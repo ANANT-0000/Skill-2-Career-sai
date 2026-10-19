@@ -3,7 +3,7 @@
 **Repository:** ResuMentor  
 **File:** `docs/ISSUES_AND_RESOLUTIONS_LOG.md`  
 **Created:** October 18, 2026 at 07:05:00 IST  
-**Last Updated:** October 18, 2026 at 07:05:00 IST  
+**Last Updated:** October 19, 2026 at 11:35:00 IST  
 **Status:** All Listed Issues Resolved and Verified
 
 ---
@@ -305,3 +305,294 @@ This document serves as an immutable, timestamped record of every technical, bui
   6. Wrapped tables in `LearnPractice.tsx` in `overflow-x-auto w-full`.
 - **Verification:**
   Verified with `npx cap sync android`, `npm run build` (compiled in under 12s, exit code 0), and `npm run build:mobile` (exported all 14 static pages and synced assets to Android with exit code 0).
+
+---
+
+### [ISSUE-013] Registration-Reset Deadlock, False "Already Exists" Collisions & Notch Safe-Area Toast Overlap
+
+- **Date:** October 18, 2026
+- **Timestamp:** 19:46:00 IST
+- **Component / Subsystem:** `src/app/api/auth/register/route.ts`, `src/app/api/auth/send-otp/route.ts`, `src/app/layout.tsx`, `src/components/Auth.tsx`
+- **Severity:** High
+- **Status:** **RESOLVED**
+- **Symptoms:**
+  1. Users attempting registration received `"An account with this email already exists"` even when onboarding was incomplete and their credentials could not log in.
+  2. Users attempting password reset for unconfirmed accounts hit a 404 `USER_NOT_FOUND` deadlock because the account existed in Supabase Auth but had not synced to `public.profiles`.
+  3. Toast error messages on mobile rendered directly behind physical device camera notches and system status bar icons.
+- **Root Cause:**
+  1. `register/route.ts` rejected any email existing in Supabase Auth without distinguishing unconfirmed accounts.
+  2. `send-otp/route.ts` relied solely on `profiles` lookup, resulting in false 404s when user profiles were not yet created.
+  3. `react-hot-toast` in `src/app/layout.tsx` used hardcoded `top: 16px` without accounting for `env(safe-area-inset-top)`.
+- **Resolution:**
+  1. Updated `register/route.ts` to detect unconfirmed accounts, automatically updating their password to the newly provided credentials and re-dispatching verification OTP.
+  2. Added fallback query in `send-otp/route.ts` to `auth.users` with automated profile upsert/healing when an account exists in auth directory.
+  3. Styled `Toaster` container in `src/app/layout.tsx` with dynamic safe-area insets (`top: max(env(safe-area-inset-top, 0px) + 12px, 20px)`).
+- **Verification:**
+  All 49 tests in `scripts/test-auth-flow.mjs` passed with zero failures.
+
+---
+
+### [ISSUE-014] Zero-Friction Direct Dashboard Transfer on Onboarding & Instant One-Tap Guest Access
+
+- **Date:** October 18, 2026
+- **Timestamp:** 20:15:00 IST
+- **Component / Subsystem:** `src/components/Auth.tsx`, `src/components/Dashboard.tsx`, `src/app/api/auth/verify-otp/route.ts`, `src/constants/auth.ts`
+- **Severity:** High
+- **Status:** **RESOLVED**
+- **Symptoms:**
+  1. Users who successfully finished registration and OTP email verification were routed back to the login screen and forced to re-type their credentials, introducing unnecessary drop-off friction.
+  2. Prospective students and mobile users had no guest entry mechanism to explore roadmaps, scholarships, and ATS features prior to registration.
+- **Root Cause:**
+  1. The OTP verification handler previously marked the account as confirmed but left the client unauthenticated, requiring a redundant secondary login call.
+  2. `Dashboard.tsx` had rigid assumptions requiring an authenticated Supabase user ID, causing empty state crashes if bypassed.
+- **Resolution:**
+  1. Implemented automatic authentication session establishment in `Auth.tsx`: immediately upon OTP verification, the client calls `supabase.auth.signInWithPassword` and routes directly to `/dashboard`.
+  2. Added "Explore App as Guest" button to `Auth.tsx` and introduced an isolated guest session state in `Dashboard.tsx` with sample roadmaps and read-only ATS demonstration features.
+- **Verification:**
+  Verified seamless instant transition to dashboard upon OTP verification, and verified guest flow without login barrier.
+
+---
+
+### [ISSUE-015] Post-Password Reset Login Failure from Mobile Keyboard Whitespace & Credential Re-entry Loop
+
+- **Date:** October 18, 2026
+- **Timestamp:** 21:50:00 IST
+- **Component / Subsystem:** `src/components/Auth.tsx`, `src/app/api/auth/verify-otp/route.ts`, `src/app/api/auth/register/route.ts`, `blackbox-testing/v1/auth/verify_auth_password_reset_blackbox.ts`
+- **Severity:** High
+- **Status:** **RESOLVED**
+- **Symptoms:**
+  1. After entering a new password in Step 2 of password reset, the user was redirected to the sign-in screen, entered their credentials, and encountered a red `"Invalid login credentials"` toast.
+  2. Red toast notification rendered directly over the Android status bar and notch area on older APK builds.
+- **Root Cause:**
+  1. Step 2 password update did not establish an active session token, bouncing the user onto the login form to re-enter credentials manually.
+  2. Android keyboard autocomplete/Gboard and password managers frequently insert trailing whitespace or zero-width unicode characters (`\u200B-\u200D\uFEFF`). Supabase Auth treats trailing whitespace strictly, rejecting the credential if spaces differ between save and login.
+- **Resolution:**
+  1. Updated `src/app/api/auth/verify-otp/route.ts` to generate an immediate session magiclink token hash via `supabase.auth.admin.generateLink` upon Step 2 password update, returning `{ success: true, verified: true, token_hash }`.
+  2. Updated `src/components/Auth.tsx` (`handleSetNewPasswordSubmit`) to immediately activate the session via `supabase.auth.verifyOtp({ token_hash, type: "magiclink" })` and seamlessly transfer the user to `APP_ROUTES.DASHBOARD` via `router.replace`, eliminating credential re-entry.
+  3. Sanitized password inputs across `register/route.ts`, `verify-otp/route.ts`, and `Auth.tsx` by stripping zero-width characters and whitespace trimming, while retaining a resilient raw-password retry fallback.
+- **Verification:**
+  1. `npm test` &rarr; 49/49 PASSED, 0 FAILED.
+  2. `npm run test:blackbox` &rarr; All 10 hardcore black-box controller lifecycle tests PASSED.
+  3. `npx tsc --noEmit` &rarr; 0 TypeScript errors.
+  4. `npm run build` &rarr; Next.js production build compiled cleanly with exit code 0.
+
+---
+
+### [ISSUE-016] Mobile System Back Navigation Redirection to Login/Auth Screen
+
+- **Date:** October 19, 2026
+- **Timestamp:** 10:55:00 IST
+- **Component / Subsystem:** `src/shared/platform/backNavigation.ts`, `src/shared/platform/backButton.ts`, `src/shared/platform/NativeAppProvider.tsx`, `src/components/Dashboard.tsx`, `src/components/mobile/IntroScreens.tsx`
+- **Severity:** High
+- **Status:** **RESOLVED**
+- **Symptoms:**
+  1. When using Android system navigation (physical back button or system edge-swipe gesture), the user was redirected back to the login, intro, or authentication screens instead of returning to the previous in-app screen or tab.
+- **Root Cause:**
+  1. `NativeAppProvider.tsx` mounted `useAndroidBackButton()` from `backButton.ts` without arguments. `backButton.ts` registered a competing low-level `@capacitor/app` listener that unconditionally invoked `window.history.back()`.
+  2. In Next.js/WebView, `window.history.back()` popped the browser session history stack back to `/auth` or `/login` or `/` instead of interacting with the in-app React state navigation stack (`tabHistoryRef`, `activePage`).
+  3. `backNavigation.ts` also contained a fallback `if (!handled && canGoBack) window.history.back()`.
+  4. `IntroScreens.tsx` used `router.push()` instead of `router.replace()`, polluting the browser history stack.
+- **Resolution:**
+  1. Harmonized `backButton.ts` with `backNavigation.ts`: removed rogue `window.history.back()` invocation and delegated legacy handlers into the unified prioritized back navigation registry.
+  2. Updated `backNavigation.ts`: eliminated fallback `window.history.back()` in native mode; back presses route through `dispatchBack()` (Priority 1: close keyboard -> Priority 2: overlays -> Priority 3: special mode -> Priority 4: save draft -> Priority 5: in-screen steps -> Priority 6: screen pop -> Priority 8: exit app confirmation).
+  3. Converted `BackPriority` into TypeScript `enum` adhering to the project's strict typing and enum guidelines.
+  4. Hardened `Dashboard.tsx` `useBackHandler("screen_pop")` to safely pop through duplicate history entries back to `DashboardSection.DASHBOARD`.
+  5. Updated `IntroScreens.tsx` with in-screen step back support and replaced `router.push` with `router.replace`.
+- **Verification:**
+  1. `node scripts/test-back-navigation.mjs` &rarr; 17/17 PASSED, 0 FAILED.
+  2. `npm test` &rarr; 49/49 PASSED, 0 FAILED.
+  3. `npm run test:blackbox` &rarr; 10/10 PASSED, 0 FAILED.
+  4. `npx tsc --noEmit` &rarr; 0 TypeScript errors.
+  5. `npm run build` &rarr; Next.js production build succeeded with exit code 0.
+  6. `npm run build:mobile` &rarr; Static export of 15 pages and Capacitor Android sync succeeded with exit code 0.
+
+---
+
+### [ISSUE-017] Live Interview Screen Mobile Viewport & Ergonomics Overhaul
+
+- **Date:** October 19, 2026
+- **Timestamp:** 11:10:00 IST
+- **Component / Subsystem:** `src/components/Dashboard.tsx`, `src/components/AIInterview.tsx`, `src/components/interview/InterviewThread.tsx`
+- **Severity:** High (Usability / Accessibility)
+- **Status:** **RESOLVED**
+- **Symptoms:**
+  1. The response input box was cut off / hidden behind the fixed mobile bottom navigation bar (`<nav class="mobile-bottom-nav">`), with no send button, mic, or character counter visible.
+  2. The mobile bottom navigation bar (~150px) and sub-tab bar (`Setup | Session | Scorecard | History`) remained visible during active live sessions, leaving little usable vertical height.
+  3. Header card text wrapped onto 4+ lines on smaller screens (`Question 1 of 8`, `Smart AI`, `End Early`).
+  4. Active question card crammed `AI INTERVIEWER` and long category titles side-by-side, causing extreme wrapping.
+  5. "Why this question?" rationale was clipped mid-sentence and spoiled interview evaluation criteria.
+  6. Question text had harsh 800-weight typography while metadata had low contrast, and seniority was displayed in lowercase (`junior`).
+- **Root Cause:**
+  1. No session-aware layout state existed in `Dashboard.tsx` to hide the fixed mobile navigation bar and remove bottom padding during active interview sessions.
+  2. `AIInterview.tsx` rendered the sub-tab bar unconditionally across all interview states.
+  3. Input box in `InterviewThread.tsx` was placed statically without viewport anchoring, auto-expansion, or safe-area inset protection.
+- **Resolution:**
+  1. In `Dashboard.tsx`: Added `isLiveInterviewSession` check (`activePage === DashboardSection.INTERVIEW && interviewTab === "session"`). Dynamically hid `<nav className="mobile-bottom-nav">` and removed bottom padding (`pb-0 overflow-hidden`) during active sessions to reclaim ~150px-200px of vertical space.
+  2. In `AIInterview.tsx`: Hid the sub-tab bar completely during active interview sessions, cleaned tab buttons, and removed sticky borders.
+  3. In `InterviewThread.tsx`:
+     - Built a clean 2-row structured session header with 8-segment progress indicator, `Smart AI` / `Quick Practice` pill, 44px pause button target, and quiet `End` button.
+     - Restacked active question card header (`AI INTERVIEWER` chip on top, category below with `truncate`).
+     - Balanced question typography (`text-sm sm:text-base font-semibold text-gray-900`) and WCAG 4.5:1 contrast text.
+     - Capitalized seniority levels (`Target: Frontend Developer · Junior`).
+     - Replaced clipped rationale with an opt-in collapsible drawer to prevent evaluation spoilers.
+     - Docked auto-expanding input bar (1–4 lines, `min-h-[44px] max-h-32`) above the screen bottom with `safe-area-inset-bottom` padding.
+     - Added voice mic transcription (Web Speech API with strict types), character counter (`{len}/3000`), `~2 min suggested` hint, and visible `Send` button disabled when empty.
+     - Added exit confirmation dialog on `End` and registered `useBackHandler(BackPriority.OVERLAY)` to catch Android system back navigation.
+- **Verification:**
+  1. `npx tsc --noEmit` &rarr; 0 TypeScript errors (Strict Typing Policy: Zero `any`).
+  2. `node scripts/test-back-navigation.mjs` &rarr; 17/17 PASSED, 0 FAILED.
+  3. `npm test` &rarr; 49/49 PASSED, 0 FAILED.
+  4. `npm run build:mobile` &rarr; Static export of 15 pages and Capacitor Android sync succeeded with exit code 0.
+
+---
+
+### [ISSUE-018] Career Roadmaps and Resume Editor Mobile Ergonomics & Visual Polish Overhaul
+
+- **Date:** October 19, 2026
+- **Timestamp:** 11:35:00 IST
+- **Component / Subsystem:** `src/components/LearnPractice.tsx`, `src/lib/resume/schema.ts`, `src/lib/resume/storage.ts`, `src/components/resume/PDFPreflightModal.tsx`, `src/components/Dashboard.tsx`, `src/components/resume/StepIndicator.tsx`, `src/components/ResumeBuilder.tsx`, `src/components/resume/ContactSection.tsx`
+- **Severity:** High (Usability / Form Ergonomics / Mobile Experience)
+- **Status:** **RESOLVED**
+- **Symptoms:**
+  1. *Screen 1 (Career Roadmaps):*
+     - Badges wrapped ("MOST POPULAR", "HIGH GROWTH") onto two lines and pushed track titles to wrap.
+     - The only interaction was "Download PDF Roadmap" without the ability to view/explore milestones in-app.
+     - Inconsistent card styling, elevation, and icon square dimensions (Card 1 looked selected/hovered while others did not).
+     - Skill tag lists wrapped onto 3+ lines with orphan trailing tags.
+     - Contrast was weak on secondary text (`text-gray-400` / `text-gray-500` against white).
+     - Fixed bottom navigation bar overlapped roadmap card action buttons.
+  2. *Screen 2 (Resume Editor):*
+     - Mobile toolbar collision: resume title, back button, Edit/Preview toggle, Analyze AI, and Export PDF buttons crowded into a single line causing extreme truncation and overlapping.
+     - Guest users were prefilled with `"Guest Explorer"` and `guest@resumentor.app`, leading to exported dummy resumes.
+     - Duplicate mobile headers: outer `Dashboard.tsx` header rendered "Resume Builder" with a back arrow directly above the inner `ResumeBuilder.tsx` header and back arrow.
+     - Multiple competing high-contrast buttons (`Analyze AI`, `Data`, `Export PDF`).
+     - Step indicator checkmark displayed on the currently active step before completion.
+     - Long forms lacked sticky section progression controls, forcing excessive scrolling to change sections.
+     - Contact section fields lacked logical grouping (City, State, Country sprawled without context), lacked optional badges, and lacked mobile keyboard types.
+- **Root Cause:**
+  1. `LearnPractice.tsx` lacked an interactive curriculum data model (`RoadmapMilestone[]`, `RoadmapItem[]`) and slide-over preview sheet.
+  2. `Dashboard.tsx` did not suppress its sticky mobile top header when active page was `"resume"`.
+  3. `schema.ts` and `storage.ts` defaulted empty resumes to dummy guest credentials.
+  4. `StepIndicator.tsx` checked `isCompleted` without gating on `!isActive`.
+  5. `ResumeBuilder.tsx` lacked a dedicated 2-row mobile toolbar layout and a docked sticky bottom navigation bar.
+- **Resolution:**
+  1. **Career Roadmaps (`LearnPractice.tsx`):**
+     - Structured roadmap data model with curriculum milestones, topic lists, and estimated project timelines.
+     - Converted badge into a single-line micro-pill (`whitespace-nowrap`) positioned above the title.
+     - Standardized 40×40 fixed icon squares (`w-10 h-10 min-w-[40px] flex-shrink-0`).
+     - Standardized card elevation (`border-gray-200 shadow-sm hover:shadow-md transition-shadow`).
+     - Limited skill tag display to 4 chips with a `+{N} more` counter.
+     - Elevated contrast of all metadata and descriptions to WCAG AA 4.5:1+.
+     - Promoted "View Roadmap" to primary action with an interactive slide-over curriculum detail modal with milestone checklists and `useBackHandler(BackPriority.OVERLAY)`. Relegated "Download PDF" to tonal secondary action.
+     - Added dual-mode In-App Roadmap Sheet: "Interactive Milestones" (with persistent topic checklists and progress bar) and "Curriculum Document" (crisp printable A4 syllabus eliminating blank iframe bugs on Android WebView).
+     - Integrated client-side `html2pdf.js` dynamic roadmap generator with `window.print()` fallback and programmatic blob download to guarantee reliable PDF exports across Android mobile and desktop browsers.
+     - Added `pb-28 sm:pb-12` bottom clearance so cards never collide with mobile bottom navigation.
+  2. **Guest Prefill Sanitization:**
+     - In `schema.ts`: `createEmptyResume` detects guest placeholders and leaves `userName` and `userEmail` blank.
+     - In `storage.ts`: `loadLocalResume` refuses to backfill "Guest Explorer" or `guest@resumentor.app`.
+     - In `PDFPreflightModal.tsx` & `ResumeBuilder.tsx`: Added `isBlocking` enforcement preventing PDF download if required candidate credentials remain blank or placeholder.
+  3. **Resume Editor Header & Chrome:**
+     - In `Dashboard.tsx`: Suppressed mobile dashboard header when `activePage === "resume"` to eliminate duplicate header and duplicate back arrow.
+     - In `ResumeBuilder.tsx`: Split mobile header into 2 clean rows: Row 1 has Back arrow, inline editable Title with pencil icon, and auto-save indicator; Row 2 has Edit/Preview switch, Analyze AI (tonal outline), Data (labeled), and Export PDF (sole filled primary).
+  4. **Step Indicator & Sticky Navigation:**
+     - In `StepIndicator.tsx`: Active step displays step number (`idx + 1`), never a checkmark; completed inactive steps display `<Check>`; added mobile "Step X of N: {Label}" progress indicator.
+     - In `ResumeBuilder.tsx`: Added docked mobile sticky bottom progression bar with `Previous`, `Next: <Section>`, and live auto-save trust status.
+  5. **Form Field Ergonomics (`ContactSection.tsx`):**
+     - Hidden duplicate "Contact Information" heading on mobile.
+     - Grouped City, State, Country under distinct "Location" subsection with `MapPin`, `Building`, and `Globe` icons.
+     - Added `(optional)` badges to optional fields.
+     - Configured mobile keyboard ergonomics (`autoComplete`, `inputMode="email"`, `inputMode="tel"`).
+- **Verification:**
+  1. `npx tsc --noEmit` &rarr; 0 TypeScript errors (Strict Typing Policy: Zero `any`).
+  2. `node scripts/test-back-navigation.mjs` &rarr; 17/17 PASSED, 0 FAILED.
+  3. `npm test` &rarr; 49/49 PASSED, 0 FAILED.
+  4. `npm run build:mobile` &rarr; Static export of 15 pages and Capacitor Android sync succeeded with exit code 0.
+
+---
+
+### [ISSUE-019] Live Interview Answer Feedback State Mobile Layout, Score Math Alignment & Status Bar Collision
+- **Date:** October 19, 2026
+- **Timestamp:** 12:05:00 IST
+- **Component / Subsystem:** `src/components/interview/InterviewThread.tsx`, `src/components/Dashboard.tsx`, `src/lib/interview/engine.ts`, `.agents/rules/05-assessment-scoring.md`
+- **Severity:** High (UI Collision / Mathematical Discrepancy / Mobile Layout Ergonomics)
+- **Status:** **RESOLVED**
+- **Symptoms:**
+  1. *Status Bar & Header Overlap:* Mobile app bar sat directly under the system status bar, causing the "29%" battery text to show through the user avatar ring and crowding status icons.
+  2. *Duplicate Header Height Theft:* Outer dashboard header and inner interview header stacked vertically, consuming ~20% of the screen height and slicing off the top of AI message cards.
+  3. *Score Math Mismatch:* Accuracy 10/10 at 40%, Confidence 9/10 at 25%, and Context 10/10 at 35% mathematically yields 97.5 (rounds to 98), yet the card showed hardcoded `100/100`.
+  4. *Overly Generous Single-Word Scoring:* One-word answers (e.g. "useMemo") were awarded high confidence (9/10) and context (10/10) without demonstrating communication reasoning or architectural constraints.
+  5. *Clipped Dimension Metric Tiles:* 3 narrow column tiles on mobile (<412px) caused labels to truncate ("Confidenc" clipped, "Accuracy" touching the border).
+  6. *Score Header Wrapping:* "Answer Score: 100/100" and "Key-Point Blend" wrapped across multiple lines.
+  7. *Next Question Button Drift:* "Next question" button wrapped inside a bordered card inside the scrollable chat container and scrolled away out of sight.
+  8. *Avatar Space Waste & All-Caps Labels:* "AI INTERVIEWER" and "YOUR RESPONSE" were large all-caps labels, and avatar circles squeezed message bubbles horizontally on mobile.
+  9. *Inconsistent Score Colors & Nested Borders:* Scores displayed inconsistent accent colors (indigo, purple, teal) rather than semantic threshold colors; cards had heavy nested outlines.
+- **Root Cause:**
+  1. `Dashboard.tsx` did not hide its mobile header when `isLiveInterviewSession` was active, leading to stacked headers and avatar collision.
+  2. `evaluateChoiceQuestion` in `engine.ts` hardcoded `answerScore = 100` instead of deriving it from `calculateAnswerScore`.
+  3. `evaluateOpenAnswerDeterministic` lacked safeguards against single-word/brief answers for context and confidence dimensions.
+  4. `InterviewThread.tsx` used a 3-column grid for metrics and rendered the feedback action button inside the scroll container instead of docked at the bottom.
+- **Resolution:**
+  1. **Single Native App Bar (`Dashboard.tsx` & `InterviewThread.tsx`):**
+     - Suppressed the generic `Dashboard.tsx` header during live interview on mobile (`activePage === "resume" || isLiveInterviewSession`).
+     - Added `pt-[max(env(safe-area-inset-top,0px),0.75rem)]` status bar safe-area inset on `InterviewThread`'s app bar.
+     - Removed the avatar on the live interview screen to eliminate battery collision.
+     - Merged Question counter, mode pill, role line (`Frontend Developer · Junior`, removing verbose "Target:"), 48px Pause, End button, and thin segmented progress bar into a single unified app bar taking ~60px total.
+  2. **Score Calculation Alignment (`src/lib/interview/engine.ts`):**
+     - In `evaluateChoiceQuestion`: derived `answerScore` strictly via `calculateAnswerScore({ accuracy, confidence, context })`, setting all 3 dimensions to 10 for correct choices (producing exact 100/100 matching parts).
+     - In `evaluateOpenAnswerDeterministic`: capped confidence at 4/10 and context at 3/10 for answers $\le 3$ words or $<25$ characters, prompting candidates to expand on practical use cases and tradeoffs.
+  3. **Score Hero & 3 Horizontal Metric Rows (`InterviewThread.tsx`):**
+     - Made the score the hero with large numerical score (`/100`), semantic rating pill (`Strong answer`, `Good answer`, `Developing`, `Needs practice`), and expandable "Scoring info" explaining the 40/35/25 weighting.
+     - Replaced clipped 3-column tiles with 3 horizontal metric rows (Accuracy, Confidence, Context) with semantic progress bars.
+  4. **Docked Bottom Action Bar & Retry (`InterviewThread.tsx`):**
+     - Docked "Next question" / "Finish interview" bar pinned at the bottom above `safe-area-inset-bottom`.
+     - Added secondary "Retry" action for learning reinforcement.
+  5. **Tonal Surfaces, Avatars & Sentence Case:**
+     - Dropped avatar circles to reclaim 40px+ horizontal width on mobile viewports.
+     - Changed labels to sentence case (`AI Interviewer`, `Your response`).
+     - Removed nested outlines, adopting soft tonal fills (`bg-slate-50/50`, `bg-indigo-50/70`).
+     - Enforced semantic score thresholds (Green $\ge 8$, Amber $5-7$, Red $< 5$).
+     - Hid browser scrollbars via `[scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden`.
+     - Added `hapticLight()` trigger when feedback card mounts and `aria-live="polite"` for screen readers.
+  6. **New Rule Documented:**
+     - Created `.agents/rules/05-assessment-scoring.md` detailing score layout, component weights, rounding, and color threshold rules.
+- **Verification:**
+  1. `npx tsc --noEmit` &rarr; 0 TypeScript errors (Strict Typing Policy: Zero `any`).
+  2. `npx tsx src/lib/interview/__tests__/verifyInterviewEngine.ts` &rarr; 7/7 PASSED.
+  3. `node scripts/test-back-navigation.mjs` &rarr; 17/17 PASSED.
+  4. `npm test` &rarr; 49/49 PASSED.
+
+---
+
+### [ISSUE-020] Android WebView Silent Download Dropping & False Download Confirmation Toasts
+
+- **Date:** October 19, 2026
+- **Timestamp:** 12:20:00 IST
+- **Component / Subsystem:** `src/components/LearnPractice.tsx`, `src/app/globals.css`
+- **Severity:** High (Broken Core Export / Phantom Download Status / UX Integrity)
+- **Status:** **RESOLVED**
+- **Symptoms:**
+  When tapping the "PDF" action button on Career Roadmap cards on Android, the app displayed a green confirmation toast: `Downloaded full-stack-roadmap.pdf`. However, no file was ever actually written or saved to the user's Android phone storage or `/Downloads` folder.
+- **Root Cause:**
+  1. Android WebView under Capacitor does not attach a native `DownloadListener` to synthetic `<a href="blob:..." download="...">` clicks by default. The WebView silently dropped the download event.
+  2. The frontend client code executed `link.click()` synchronously and immediately fired `toast.success("Downloaded...")` without checking whether the platform supported programmatic blob downloads.
+  3. When invoking the print fallback, there were no `@media print` rules, causing page chrome and toasts to obscure the printable syllabus.
+- **Resolution:**
+  1. **Platform Detection (`isNative()`):**
+     - On native Android (`isNative()`), decoupled from the broken `<a download>` mechanism to prevent phantom success toasts.
+     - When tapping "PDF" on a roadmap card on mobile, immediately opens the formatted in-app Curriculum Document syllabus and prompts: *"Opened [Track] — Tap 'Save as PDF' to save locally"*.
+  2. **Native Print Spooler Integration ("Save as PDF"):**
+     - Primary modal action on native mobile changed to **"Save as PDF"**, which triggers `window.print()`.
+     - In Android WebView, `window.print()` natively invokes the Android Print Spooler ("Save as PDF"), allowing the user to select their destination folder (`Downloads`, `Documents`, or `Drive`) and save the actual `.pdf` document.
+  3. **Native OS Share Integration:**
+     - Added a dedicated secondary **"Share"** button in the roadmap modal footer using `shareContent` (`@capacitor/share`), enabling candidates to share the complete structured syllabus via WhatsApp, Gmail, Drive, or Notes.
+  4. **Global Print Stylesheet (`src/app/globals.css`):**
+     - Added comprehensive `@media print` CSS rules: hides mobile bottom nav, buttons, toasts, and headers; sets clean white background, black typography, and formats `.printable-document` for clean A4 multi-page output.
+  5. **Study Notes Download Realignment:**
+     - Updated `handleDownloadPdf` in `LearnPractice.tsx` to use native share/spooler on Android and blob download on web without phantom success toasts.
+- **Verification:**
+  1. `npx tsc --noEmit` &rarr; 0 TypeScript errors (Strict Typing Policy: Zero `any`).
+  2. `npm test` &rarr; 49/49 PASSED, 0 FAILED.
+  3. `node scripts/test-back-navigation.mjs` &rarr; 17/17 PASSED, 0 FAILED.
+  4. `npm run build:mobile` &rarr; Static export of 15 pages and Capacitor Android sync succeeded with exit code 0.
+
+

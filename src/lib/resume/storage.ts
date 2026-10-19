@@ -42,15 +42,22 @@ export function loadLocalResume(
     const migrated = migrateResumeSchema(parsed);
 
     // If the saved resume was empty of contact details but we know the user's name/email, backfill them
-    if (!migrated.contact.fullName && defaultUser?.name) {
-      migrated.contact.fullName = defaultUser.name;
-    }
-    if (!migrated.contact.email && defaultUser?.email) {
-      migrated.contact.email = defaultUser.email;
+    // (Ensure guest placeholders like 'Guest Explorer' are not backfilled into actual candidate fields)
+    const isGuestPlaceholder =
+      defaultUser?.name?.toLowerCase() === "guest explorer" ||
+      defaultUser?.email?.toLowerCase() === "guest@resumentor.app";
+
+    if (!isGuestPlaceholder) {
+      if (!migrated.contact.fullName && defaultUser?.name) {
+        migrated.contact.fullName = defaultUser.name;
+      }
+      if (!migrated.contact.email && defaultUser?.email) {
+        migrated.contact.email = defaultUser.email;
+      }
     }
 
     return migrated;
-  } catch (err) {
+  } catch (err: unknown) {
     console.error("Failed to load local resume:", err);
     return createEmptyResume(defaultUser);
   }
@@ -85,7 +92,7 @@ export function saveLocalResume(data: ResumeData, userId?: string): void {
       revisions = revisions.slice(0, MAX_REVISIONS);
     }
     localStorage.setItem(revisionsKey, JSON.stringify(revisions));
-  } catch (err) {
+  } catch (err: unknown) {
     console.error("Failed to save local resume:", err);
   }
 }
@@ -112,23 +119,18 @@ export function restoreRevision(revision: ResumeRevision, userId?: string): Resu
   return migrated;
 }
 
+import { saveTextFile, SaveFileResult } from "@/shared/platform";
+
 /**
  * Exports the raw resume as a portable .json data file (Section 5.4)
+ * Cross-platform compatible for Android Native (Filesystem + Share) and Web (Blob download).
  */
-export function exportResumeDataFile(data: ResumeData): void {
+export async function exportResumeDataFile(data: ResumeData): Promise<SaveFileResult> {
   const jsonStr = JSON.stringify(data, null, 2);
-  const blob = new Blob([jsonStr], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
   const safeName = (data.contact.fullName || "resume").replace(/[^a-zA-Z0-9_-]/g, "_");
   const filename = `${safeName}_data.json`;
 
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  return saveTextFile(jsonStr, filename, "application/json");
 }
 
 /**
@@ -143,7 +145,7 @@ export async function importResumeDataFile(file: File, userId?: string): Promise
   }
 
   const text = await file.text();
-  let parsed: any;
+  let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {

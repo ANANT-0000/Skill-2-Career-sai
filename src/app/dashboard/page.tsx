@@ -3,8 +3,10 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import Dashboard from "../../components/Dashboard";
+import Dashboard from "@/components/Dashboard";
 import { APP_ROUTES } from "@/constants/endpoints";
+import { SkeletonDashboard } from "@/shared/ui/Skeleton";
+import { STORAGE_KEYS } from "@/constants/roles";
 
 export const dynamic = "force-dynamic";
 
@@ -13,22 +15,30 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // 1. Initial session check
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!session?.user) {
+    const checkAccess = (sessionUser: unknown) => {
+      const isGuest =
+        typeof window !== "undefined" &&
+        (localStorage.getItem(STORAGE_KEYS.GUEST_MODE) === "true" ||
+          sessionStorage.getItem(STORAGE_KEYS.GUEST_MODE) === "true" ||
+          window.location.search.includes("guest=true"));
+
+      if (!sessionUser && !isGuest) {
         router.replace(APP_ROUTES.AUTH);
       } else {
         setLoading(false);
       }
+    };
+
+    // 1. Initial session check
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      checkAccess(session?.user);
     });
 
     // 2. Auth state subscription
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!session?.user) {
-        router.replace(APP_ROUTES.AUTH);
-      } else {
-        setLoading(false);
-      }
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      checkAccess(session?.user);
     });
 
     return () => {
@@ -37,14 +47,7 @@ export default function DashboardPage() {
   }, [router]);
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-indigo-600 border-t-transparent"></div>
-          <p className="mt-4 text-gray-500 font-semibold">Loading your workspace...</p>
-        </div>
-      </div>
-    );
+    return <SkeletonDashboard />;
   }
 
   return <Dashboard />;

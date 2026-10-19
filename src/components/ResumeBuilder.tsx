@@ -16,7 +16,7 @@ import { toast } from "react-hot-toast";
 
 // Modular Section Components
 import StepIndicator from "./resume/StepIndicator";
-import MobileBottomNav, { MobileTab } from "./resume/MobileBottomNav";
+type MobileTab = "edit" | "preview";
 import ContactSection from "./resume/ContactSection";
 import SummarySection from "./resume/SummarySection";
 import ExperienceSection from "./resume/ExperienceSection";
@@ -24,14 +24,23 @@ import EducationSection from "./resume/EducationSection";
 import SkillsSection from "./resume/SkillsSection";
 import ProjectsSection from "./resume/ProjectsSection";
 import CertificationsSection from "./resume/CertificationsSection";
-import AdditionalSections from "./resume/AdditionalSections";
+import AdditionalSections, { AdditionalSectionKey } from "./resume/AdditionalSections";
 import ATSChecklist from "./resume/ATSChecklist";
 import DataManagementModal from "./resume/DataManagementModal";
 import AIAnalysisReport from "./resume/AIAnalysisReport";
 import AIConsentModal, { CONSENT_STORAGE_KEY } from "./resume/AIConsentModal";
 import PDFPreflightModal, { PreflightWarning } from "./resume/PDFPreflightModal";
 import { ResumePreview } from "./resume/ResumePreview";
-import { hapticSuccess, hapticLight } from "@/shared/platform";
+import {
+  hapticSuccess,
+  hapticLight,
+  useBackHandler,
+  dispatchBack,
+  shareContent,
+  isNative,
+  exportResumeFromServer,
+} from "@/shared/platform";
+import { SECTION_REGISTRY } from "@/lib/resume/registry";
 
 import {
   Download,
@@ -46,6 +55,7 @@ import {
   ChevronDown,
   ChevronUp,
   RotateCw,
+  Pencil,
 } from "lucide-react";
 
 const ACCENT_COLORS = [
@@ -61,7 +71,6 @@ interface ResumeBuilderProps {
     id?: string;
     name?: string;
     email?: string;
-    [key: string]: any;
   } | null;
 }
 
@@ -74,6 +83,9 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
   const [mobileTab, setMobileTab] = useState<MobileTab>("edit");
   const [saveStatus, setSaveStatus] = useState<"Saved" | "Saving..." | "Idle">("Saved");
   const [showDataModal, setShowDataModal] = useState(false);
+
+  // In-screen section navigation history stack (Spec Section handling)
+  const sectionHistoryRef = useRef<SectionKey[]>([]);
 
   // Sync user and ensure newly registered users get clean, fresh state
   useEffect(() => {
@@ -129,7 +141,7 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
             saveLocalResume(freshResume, activeId);
           }
         }
-      } catch (err) {
+      } catch (err: unknown) {
         console.warn("[ResumeBuilder sync notice]:", err);
       }
     };
@@ -156,6 +168,7 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
   const [showJobDescInput, setShowJobDescInput] = useState(false);
 
   const previewPrintRef = useRef<HTMLDivElement>(null);
+  const offscreenPrintRef = useRef<HTMLDivElement>(null);
   const autosaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Debounced Autosave (800ms) with cloud sync complying with Section 5.3
@@ -169,8 +182,8 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
         const activeUserId = currentUser?.id;
         saveLocalResume(updated, activeUserId);
 
-        // Async sync to Supabase PostgreSQL profiles table
-        if (activeUserId) {
+        // Async sync to Supabase PostgreSQL profiles table (skip for guests to avoid DB errors)
+        if (activeUserId && activeUserId !== "guest-user" && !activeUserId.startsWith("guest-")) {
           try {
             await supabase
               .from("profiles")
@@ -179,8 +192,11 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
                 updated_at: new Date().toISOString(),
               })
               .eq("id", activeUserId);
-          } catch (dbErr: any) {
-            console.warn("[Autosave Cloud Sync Notice]:", dbErr.message);
+          } catch (dbErr: unknown) {
+            console.warn(
+              "[Autosave Cloud Sync Notice]:",
+              dbErr instanceof Error ? dbErr.message : "Sync skipped"
+            );
           }
         }
 
@@ -193,6 +209,8 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
   const handleUpdateResume = (next: ResumeData) => {
     setResume(next);
     triggerAutosave(next);
+    // Reset export state when content changes — the previous export no longer matches the current content
+    if (exportState === "done") setExportState("ready");
   };
 
   // Section completion calculator
@@ -221,9 +239,17 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
   );
   const currentStepIndex = visibleSections.indexOf(activeSection);
 
+  const navigateToSection = (newSec: SectionKey) => {
+    if (newSec !== activeSection) {
+      sectionHistoryRef.current.push(activeSection);
+      setActiveSection(newSec);
+    }
+    setMobileTab("edit");
+  };
+
   const handleNextStep = () => {
     if (currentStepIndex < visibleSections.length - 1) {
-      setActiveSection(visibleSections[currentStepIndex + 1]);
+      navigateToSection(visibleSections[currentStepIndex + 1]);
       window.scrollTo({ top: 0, behavior: "smooth" });
     } else {
       setMobileTab("preview");
@@ -231,11 +257,57 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
   };
 
   const handlePrevStep = () => {
-    if (currentStepIndex > 0) {
+    if (sectionHistoryRef.current.length > 0) {
+      const prev = sectionHistoryRef.current.pop()!;
+      setActiveSection(prev);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } else if (currentStepIndex > 0) {
       setActiveSection(visibleSections[currentStepIndex - 1]);
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
   };
+
+  // Register Back Navigation Handlers per Implementation Guide
+  // Priority 2: Modals and bottom sheets
+  useBackHandler("overlay", () => {
+    if (showDataModal) {
+      setShowDataModal(false);
+      return true;
+    }
+    if (showPreflightModal) {
+      setShowPreflightModal(false);
+      return true;
+    }
+    if (showConsentModal) {
+      setShowConsentModal(false);
+      return true;
+    }
+    if (showAnalysisReport) {
+      setShowAnalysisReport(false);
+      return true;
+    }
+    return false;
+  }, [showDataModal, showPreflightModal, showConsentModal, showAnalysisReport]);
+
+  // Priority 5: In-screen step history (Sections & Edit/Preview toggle)
+  useBackHandler("in_screen", () => {
+    // 1. If currently in Preview mode on mobile, back returns to Edit in the same section
+    if (mobileTab === "preview") {
+      setMobileTab("edit");
+      return true;
+    }
+
+    // 2. Pop to previous section if in-screen history exists
+    if (sectionHistoryRef.current.length > 0) {
+      const prevSection = sectionHistoryRef.current.pop()!;
+      setActiveSection(prevSection);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      return true;
+    }
+
+    // Step history is empty: return false to allow screen pop
+    return false;
+  }, [mobileTab, activeSection]);
 
   // Extract clean text in linear reading order (Phase 2 Spec 3.2 & 8.5)
   const getExtractedText = (): string => {
@@ -278,6 +350,72 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
       });
     } else if (resume.skills.flatList?.length > 0) {
       parts.push(`SKILLS: ${resume.skills.flatList.join(", ")}`);
+    }
+
+    if (resume.projects?.length > 0) {
+      parts.push("PROJECTS");
+      resume.projects.forEach((p) => {
+        parts.push(`${p.name}${p.role ? ` (${p.role})` : ""}`);
+        (p.bullets || []).forEach((b) => parts.push(`- ${b}`));
+      });
+    }
+
+    if (resume.certifications?.length > 0) {
+      parts.push("CERTIFICATIONS");
+      resume.certifications.forEach((c) => {
+        parts.push(`${c.name} - ${c.issuer}${c.issueDate ? ` (${c.issueDate})` : ""}`);
+      });
+    }
+
+    if (resume.awards?.length > 0) {
+      parts.push("AWARDS");
+      resume.awards.forEach((a) => {
+        parts.push(`${a.title} - ${a.issuer}${a.date ? ` (${a.date})` : ""}${a.description ? `: ${a.description}` : ""}`);
+      });
+    }
+
+    if (resume.languages?.length > 0) {
+      parts.push("LANGUAGES");
+      parts.push(
+        resume.languages
+          .filter((l) => l.language.trim())
+          .map((l) => `${l.language} (${l.proficiency})`)
+          .join(", ")
+      );
+    }
+
+    if (resume.publications?.length > 0) {
+      parts.push("PUBLICATIONS");
+      resume.publications.forEach((pub) => {
+        parts.push(`${pub.title} (${pub.venue}${pub.date ? `, ${pub.date}` : ""})`);
+      });
+    }
+
+    if (resume.volunteer?.length > 0) {
+      parts.push("VOLUNTEER");
+      resume.volunteer.forEach((v) => {
+        parts.push(`${v.role} at ${v.organization}`);
+        (v.bullets || []).forEach((b) => parts.push(`- ${b}`));
+      });
+    }
+
+    if (resume.interests?.length > 0) {
+      parts.push(`INTERESTS: ${resume.interests.join(", ")}`);
+    }
+
+    if (resume.referencesText) {
+      parts.push(`REFERENCES: ${resume.referencesText}`);
+    }
+
+    if (resume.customSections?.length > 0) {
+      resume.customSections.forEach((cs) => {
+        parts.push(cs.title.toUpperCase());
+        if (Array.isArray(cs.content)) {
+          cs.content.forEach((b) => parts.push(`- ${b}`));
+        } else {
+          parts.push(cs.content);
+        }
+      });
     }
 
     return parts.join("\n\n");
@@ -370,8 +508,11 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
       setAnalysisResponse(data);
       setShowAnalysisReport(true);
       toast.success("AI ATS Analysis complete!", { id: toastId });
-    } catch (err: any) {
-      toast.error(err.message || "An error occurred during resume analysis.", { id: toastId });
+    } catch (err: unknown) {
+      toast.error(
+        err instanceof Error ? err.message : "An error occurred during resume analysis.",
+        { id: toastId }
+      );
     } finally {
       setAnalysisLoading(false);
     }
@@ -386,77 +527,71 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
     triggerAnalysisPipeline();
   };
 
-  // Part B: One-Click PDF Export with Pre-flight (Section 4.1 & 4.2)
+  // Part B: Server-Side PDF Export with Pre-flight (Section 4.1 & 4.2)
   const executePDFExport = async () => {
     setExportState("preparing");
-    const toastId = toast.loading("Preparing ATS print-ready PDF...");
+    const toastId = toast.loading("Generating your high-resolution PDF…");
 
     try {
-      const element = previewPrintRef.current;
-      if (!element) throw new Error("Preview canvas not found.");
+      const result = await exportResumeFromServer(resume);
 
-      const html2pdf = (await import("html2pdf.js")).default;
+      if (!result.ok) {
+        throw new Error(result.message || "Failed to generate PDF on server");
+      }
 
-      // Sanitized clean file name (Section 4.4)
-      const cleanName = (resume.contact.fullName || "")
-        .trim()
-        .replace(/[^a-zA-Z0-9]/g, "-")
-        .replace(/-+/g, "-")
-        .replace(/^-|-$/g, "");
-      const filename = cleanName ? `${cleanName}-Resume.pdf` : "Resume.pdf";
-
-      const opt = {
-        margin: 0.3,
-        filename,
-        image: { type: "jpeg" as const, quality: 0.98 },
-        html2canvas: { scale: 2.5, useCORS: true, logging: false },
-        jsPDF: {
-          unit: "in",
-          format: resume.meta.pageSize === "Letter" ? "letter" : "a4",
-          orientation: "portrait" as const,
-        },
-      };
-
-      await html2pdf().from(element).set(opt).save();
-
-      setExportState("done");
+      setExportState("ready");
       setExportFailCount(0);
       hapticSuccess();
-      toast.success(`Downloaded ${filename}`, { id: toastId });
-    } catch (err: any) {
-      setExportState("failed");
-      const nextFail = exportFailCount + 1;
-      setExportFailCount(nextFail);
 
-      if (nextFail >= 2) {
-        toast.error("PDF export failed. Opening browser print dialog as fallback...", {
-          id: toastId,
-        });
-        window.print();
+      if (result.delivered) {
+        toast.success(result.message, { id: toastId, duration: 5000 });
       } else {
-        toast.error(err.message || "Export failed. Tap again to retry.", { id: toastId });
+        // User cancelled the share sheet — dismiss the loading toast silently
+        toast.dismiss(toastId);
       }
+    } catch (err: unknown) {
+      setExportState("failed");
+      setExportFailCount((prev) => prev + 1);
+      const msg =
+        err instanceof Error ? err.message : "Export failed. Tap Retry to try again.";
+      toast.error(msg, { id: toastId, duration: 8000 });
     }
   };
 
   const handleExportPDF = (force = false) => {
     if (exportState === "preparing") return;
 
+    const fullNameTrimmed = resume.contact.fullName?.trim() || "";
+    const isPlaceholderName =
+      !fullNameTrimmed ||
+      fullNameTrimmed.toLowerCase() === "guest explorer";
+
+    const emailTrimmed = resume.contact.email?.trim() || "";
+    const isPlaceholderEmail =
+      !emailTrimmed ||
+      emailTrimmed.toLowerCase() === "guest@resumentor.app";
+
     if (!force) {
       // Pre-flight check (Section 4.2)
       const warnings: PreflightWarning[] = [];
-      if (!resume.contact.fullName?.trim()) {
+      if (isPlaceholderName) {
         warnings.push({
           field: "Full Name",
-          message: "Candidate full name is blank.",
+          message: !fullNameTrimmed
+            ? "Candidate full name is blank."
+            : "Cannot export with placeholder 'Guest Explorer'. Please enter your real full name.",
           section: "contact",
+          isBlocking: true,
         });
       }
-      if (!resume.contact.email?.trim()) {
+      if (isPlaceholderEmail) {
         warnings.push({
           field: "Email Address",
-          message: "No email address found for ATS contact parsing.",
+          message: !emailTrimmed
+            ? "No email address found for ATS contact parsing."
+            : "Cannot export with placeholder 'guest@resumentor.app'. Please enter your real email.",
           section: "contact",
+          isBlocking: true,
         });
       }
       if (resume.experience.length === 0) {
@@ -464,12 +599,20 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
           field: "Work Experience",
           message: "No work experience entries added.",
           section: "experience",
+          isBlocking: false,
         });
       }
 
       if (warnings.length > 0) {
         setPreflightWarnings(warnings);
         setShowPreflightModal(true);
+        return;
+      }
+    } else {
+      // Hard guard: even with force = true, never export dummy or empty credentials
+      if (isPlaceholderName || isPlaceholderEmail) {
+        toast.error("Please enter your real full name and email address before exporting.");
+        navigateToSection("contact");
         return;
       }
     }
@@ -479,39 +622,130 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
   };
 
   const handlePrintBrowser = () => {
+    if (isNative()) {
+      handleExportPDF(false);
+      return;
+    }
     window.print();
   };
 
   return (
-    <div className="min-h-dvh bg-gray-50 flex flex-col pb-24 lg:pb-8">
-      {/* Top Action Toolbar */}
-      <header className="bg-white border-b border-gray-200 px-3 sm:px-4 py-2 sm:py-3 sticky top-0 z-20 shadow-xs flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-          <input
-            type="text"
-            value={resume.meta.title}
-            onChange={(e) =>
-              handleUpdateResume({
-                ...resume,
-                meta: { ...resume.meta, title: e.target.value },
-              })
-            }
-            className="font-bold text-gray-900 text-sm sm:text-base border-b border-transparent hover:border-gray-300 focus:border-indigo-600 focus:outline-none px-1 py-0.5 rounded max-w-[140px] sm:max-w-xs truncate"
-            title="Rename Resume"
-          />
-          <span className="text-[11px] font-semibold text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full hidden sm:inline">
-            {saveStatus}
-          </span>
+    <div className="min-h-dvh bg-gray-50 flex flex-col pb-6 lg:pb-8">
+      {/* Top Action Toolbar: Clean layout without overlaps, full-width title row on mobile */}
+      <header className="bg-white border-b border-gray-200 px-3 sm:px-6 pt-[calc(var(--sat,env(safe-area-inset-top,0px))+0.625rem)] pb-2.5 sm:py-3 sticky top-0 z-20 shadow-xs flex flex-col gap-2 sm:gap-2.5">
+        {/* Row 1: Unified Back Arrow, Document Title (Full width on mobile with pencil), Save Status */}
+        <div className="flex items-center justify-between gap-2 w-full">
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={() => dispatchBack()}
+              aria-label="Back"
+              className="p-2 -ml-1 text-gray-600 hover:text-indigo-600 hover:bg-gray-100 rounded-lg min-w-[48px] min-h-[48px] flex items-center justify-center transition active:scale-95 shrink-0"
+              title="Go Back"
+            >
+              <ChevronLeft className="h-5 w-5" />
+            </button>
 
-          {/* Mobile Segmented Toggle (Edit vs Preview) */}
-          <div className="flex lg:hidden bg-gray-100 p-0.5 rounded-xl border border-gray-200">
+            <div className="flex items-center gap-1 min-w-0 flex-1">
+              <input
+                type="text"
+                value={resume.meta.title}
+                onChange={(e) =>
+                  handleUpdateResume({
+                    ...resume,
+                    meta: { ...resume.meta, title: e.target.value },
+                  })
+                }
+                className="font-bold text-gray-900 text-sm sm:text-base border-b border-transparent hover:border-gray-300 focus:border-indigo-600 focus:outline-none px-1 py-0.5 rounded truncate flex-1 min-w-0"
+                title="Rename Resume"
+                placeholder="My Resume"
+              />
+              <Pencil className="h-3 w-3 text-gray-400 shrink-0" />
+            </div>
+
+            <span className="text-[10px] font-semibold text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full shrink-0">
+              {saveStatus}
+            </span>
+          </div>
+
+          {/* Desktop Right Actions (hidden on mobile, rendered below on mobile) */}
+          <div className="hidden lg:flex items-center gap-2 shrink-0">
+            {/* AI ATS Analysis Action (Tonal Secondary) */}
+            <button
+              type="button"
+              disabled={analysisLoading}
+              onClick={triggerAnalysisPipeline}
+              className="inline-flex items-center gap-1.5 text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 px-3.5 py-2.5 rounded-xl transition shadow-2xs disabled:opacity-50 min-h-[48px]"
+              title="Evaluate ATS score and improvement tips with Gemini AI"
+            >
+              {analysisLoading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5 text-purple-600" />
+              )}
+              <span>Analyze</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowDataModal(true)}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 px-3.5 py-2.5 rounded-xl transition min-h-[48px]"
+              title="Import/Export JSON or revision history"
+            >
+              <Database className="h-4 w-4" />
+              <span>Data</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handlePrintBrowser}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 px-3.5 py-2.5 rounded-xl transition min-h-[48px]"
+              title="Print via browser"
+            >
+              <Printer className="h-4 w-4" />
+              <span>Print</span>
+            </button>
+
+            {/* One-Click Export PDF Button (Primary High Emphasis) */}
+            <button
+              type="button"
+              disabled={exportState === "preparing"}
+              onClick={() => handleExportPDF(false)}
+              className={`inline-flex items-center gap-1.5 text-xs font-bold px-4 py-2.5 rounded-xl transition shadow-xs min-h-[48px] ${
+                exportState === "failed"
+                  ? "bg-red-600 hover:bg-red-700 text-white"
+                  : "bg-indigo-600 hover:bg-indigo-700 text-white"
+              } disabled:opacity-50`}
+            >
+              {exportState === "preparing" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Download className="h-3.5 w-3.5" />
+              )}
+              <span>
+                {exportState === "preparing"
+                  ? "Generating PDF…"
+                  : exportState === "done"
+                  ? "Exported"
+                  : exportState === "failed"
+                  ? "Retry"
+                  : "Export PDF"}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Row 2 (Mobile only): Segmented Controls & Action Buttons with horizontal scroll protection */}
+        <div className="flex lg:hidden items-center justify-between gap-1 w-full pt-1 border-t border-gray-100 overflow-x-auto no-scrollbar py-0.5 -mx-1 px-1">
+          {/* Edit vs Preview Segmented Control */}
+          <div className="flex items-center bg-gray-100 p-0.5 rounded-xl border border-gray-200 shrink-0">
             <button
               type="button"
               onClick={() => setMobileTab("edit")}
-              className={`px-2.5 py-1 rounded-lg text-xs font-bold transition min-h-[32px] ${
+              className={`px-3 py-2 text-xs font-bold rounded-lg transition min-h-[48px] flex items-center justify-center ${
                 mobileTab === "edit"
-                  ? "bg-white text-indigo-600 shadow-xs"
-                  : "text-gray-500 hover:text-gray-800"
+                  ? "bg-white text-indigo-700 shadow-2xs"
+                  : "text-gray-600 hover:text-gray-900"
               }`}
             >
               Edit
@@ -519,82 +753,69 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
             <button
               type="button"
               onClick={() => setMobileTab("preview")}
-              className={`px-2.5 py-1 rounded-lg text-xs font-bold transition min-h-[32px] ${
+              className={`px-3 py-2 text-xs font-bold rounded-lg transition min-h-[48px] flex items-center justify-center ${
                 mobileTab === "preview"
-                  ? "bg-white text-indigo-600 shadow-xs"
-                  : "text-gray-500 hover:text-gray-800"
+                  ? "bg-white text-indigo-700 shadow-2xs"
+                  : "text-gray-600 hover:text-gray-900"
               }`}
             >
               Preview
             </button>
           </div>
-        </div>
 
-        <div className="flex items-center gap-2">
-          {/* Phase 2: AI ATS Analysis Action */}
-          <button
-            type="button"
-            disabled={analysisLoading}
-            onClick={triggerAnalysisPipeline}
-            className="inline-flex items-center gap-1.5 text-xs font-bold text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 px-3.5 py-2 rounded-xl transition shadow-xs disabled:opacity-50 min-h-[40px]"
-            title="Evaluate ATS score and improvement tips with Gemini AI"
-          >
-            {analysisLoading ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Sparkles className="h-4 w-4 text-purple-200" />
-            )}
-            <span>{analysisLoading ? "Analyzing..." : "Analyze Resume"}</span>
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* AI ATS Analysis (Tonal Outline) */}
+            <button
+              type="button"
+              disabled={analysisLoading}
+              onClick={triggerAnalysisPipeline}
+              className="inline-flex items-center gap-1 text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 px-3 py-2 rounded-xl transition disabled:opacity-50 min-h-[48px] shrink-0"
+              title="Evaluate ATS score with Gemini AI"
+            >
+              {analysisLoading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5 text-purple-600" />
+              )}
+              <span>Analyze</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={() => setShowDataModal(true)}
-            className="inline-flex items-center gap-1.5 text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 px-3 py-2 rounded-xl transition min-h-[40px]"
-            title="Import/Export JSON or revision history"
-          >
-            <Database className="h-4 w-4" />
-            <span className="hidden sm:inline">Data</span>
-          </button>
+            {/* Data modal */}
+            <button
+              type="button"
+              onClick={() => setShowDataModal(true)}
+              className="inline-flex items-center gap-1 text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 px-3 py-2 rounded-xl transition min-h-[48px] shrink-0"
+              title="Import/Export JSON or revision history"
+            >
+              <Database className="h-3.5 w-3.5" />
+              <span>Data</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={handlePrintBrowser}
-            className="inline-flex items-center gap-1.5 text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 px-3 py-2 rounded-xl transition min-h-[40px] hidden md:inline-flex"
-            title="Print via browser"
-          >
-            <Printer className="h-4 w-4" />
-            <span>Print</span>
-          </button>
-
-          {/* Part B: One-Click Export PDF Button */}
-          <button
-            type="button"
-            disabled={exportState === "preparing"}
-            onClick={() => handleExportPDF(false)}
-            className={`inline-flex items-center gap-1.5 text-xs font-bold px-4 py-2 rounded-xl transition shadow-sm min-h-[40px] ${
-              exportState === "done"
-                ? "bg-emerald-600 hover:bg-emerald-700 text-white"
-                : exportState === "failed"
-                ? "bg-red-600 hover:bg-red-700 text-white"
-                : "bg-indigo-600 hover:bg-indigo-700 text-white"
-            } disabled:opacity-50`}
-          >
-            {exportState === "preparing" ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Download className="h-4 w-4" />
-            )}
-            <span>
-              {exportState === "preparing"
-                ? "Exporting..."
-                : exportState === "done"
-                ? "Downloaded"
-                : exportState === "failed"
-                ? "Retry Export"
-                : "Export PDF"}
-            </span>
-          </button>
+            {/* Export PDF (Sole Primary) */}
+            <button
+              type="button"
+              disabled={exportState === "preparing"}
+              onClick={() => handleExportPDF(false)}
+              className={`inline-flex items-center gap-1 text-xs font-bold px-3.5 py-2 rounded-xl transition shadow-xs min-h-[48px] shrink-0 ${
+                exportState === "failed"
+                  ? "bg-red-600 hover:bg-red-700 text-white"
+                  : "bg-indigo-600 hover:bg-indigo-700 text-white"
+              } disabled:opacity-50`}
+            >
+              {exportState === "preparing" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Download className="h-3.5 w-3.5" />
+              )}
+              <span>
+                {exportState === "preparing"
+                  ? "Generating…"
+                  : exportState === "failed"
+                  ? "Retry"
+                  : "Export"}
+              </span>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -603,22 +824,19 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
         sectionOrder={resume.meta.sectionOrder}
         sectionVisibility={resume.meta.sectionVisibility}
         activeSection={activeSection}
-        onSelectSection={(sec) => {
-          setActiveSection(sec);
-          setMobileTab("edit");
-        }}
+        onSelectSection={(sec) => navigateToSection(sec)}
         completionMap={completionMap}
       />
 
-      {/* Main Workspace: Two-pane Desktop (Form Left, Live Preview Right) */}
-      <div className="max-w-7xl mx-auto w-full px-3 sm:px-6 py-4 sm:py-6 flex-1 flex flex-col lg:flex-row gap-4 lg:gap-8 items-start">
+      {/* Main Workspace: Full width mobile, Two-pane Desktop */}
+      <div className="max-w-7xl mx-auto w-full px-1.5 sm:px-4 lg:px-6 py-2 sm:py-5 flex-1 flex flex-col lg:flex-row gap-2.5 sm:gap-4 lg:gap-8 items-start">
         {/* LEFT PANE: Form Sections (Visible on Desktop OR when mobileTab === 'edit') */}
         <div
-          className={`w-full lg:w-1/2 flex flex-col space-y-4 sm:space-y-6 ${
+          className={`w-full lg:w-1/2 flex flex-col space-y-3 sm:space-y-6 ${
             mobileTab === "preview" ? "hidden lg:flex" : "flex"
           }`}
         >
-          <div className="bg-white rounded-xl sm:rounded-2xl p-4 sm:p-7 border border-gray-200 shadow-xs">
+          <div className="bg-transparent sm:bg-white rounded-2xl sm:rounded-3xl p-0 sm:p-6 lg:p-7 border-0 sm:border sm:border-gray-150 shadow-none sm:shadow-xs">
             {activeSection === "contact" && (
               <ContactSection
                 data={resume.contact}
@@ -672,18 +890,18 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
             ].includes(activeSection) && (
               <AdditionalSections
                 resume={resume}
-                sectionKey={activeSection as any}
+                sectionKey={activeSection as AdditionalSectionKey}
                 onChange={handleUpdateResume}
               />
             )}
 
             {/* Stepper Navigation Buttons */}
-            <div className="mt-8 pt-6 border-t border-gray-100 flex items-center justify-between">
+            <div className="mt-4 pt-3 sm:mt-8 sm:pt-6 border-t border-gray-150 flex items-center justify-between">
               <button
                 type="button"
                 onClick={handlePrevStep}
                 disabled={currentStepIndex === 0}
-                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-gray-200 text-xs sm:text-sm font-semibold text-gray-600 hover:bg-gray-50 transition disabled:opacity-40 min-h-[44px]"
+                className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl border border-gray-200 text-xs sm:text-sm font-semibold text-gray-600 hover:bg-gray-50 transition disabled:opacity-40 min-h-[38px] sm:min-h-[44px]"
               >
                 <ChevronLeft className="h-4 w-4" /> Previous
               </button>
@@ -691,7 +909,7 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
               <button
                 type="button"
                 onClick={handleNextStep}
-                className="inline-flex items-center gap-1.5 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs sm:text-sm font-bold transition shadow-sm min-h-[44px]"
+                className="inline-flex items-center gap-1.5 px-4 sm:px-6 py-2 sm:py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs sm:text-sm font-bold transition shadow-sm min-h-[38px] sm:min-h-[44px]"
               >
                 {currentStepIndex === visibleSections.length - 1 ? (
                   <>
@@ -811,13 +1029,13 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
           {/* Controls Bar: Template, Palette, Page Size */}
           <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <span className="text-xs font-bold text-gray-800 uppercase tracking-wider">
+              <span className="text-xs font-bold text-gray-800 tracking-wider">
                 ATS Templates
               </span>
 
               {/* Template Switcher */}
-              <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-xl">
-                {(["classic", "modern", "compact", "academic"] as TemplateId[]).map((tId) => (
+              <div className="flex flex-wrap items-center gap-1 bg-gray-100 p-1 rounded-xl">
+                {(["classic", "modern", "compact", "academic", "minimalist", "creative"] as TemplateId[]).map((tId) => (
                   <button
                     key={tId}
                     type="button"
@@ -898,7 +1116,7 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
           </div>
 
           {/* Paper Canvas Preview Container */}
-          <div className="bg-gray-200/80 p-3 sm:p-6 rounded-2xl overflow-x-auto shadow-inner border border-gray-300/60 flex justify-center">
+          <div className="bg-gray-200/80 p-1.5 sm:p-6 rounded-xl sm:rounded-2xl overflow-x-auto shadow-inner border border-gray-300/60 flex justify-center">
             <ResumePreview ref={previewPrintRef} resume={resume} />
           </div>
 
@@ -907,12 +1125,40 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
         </div>
       </div>
 
-      {/* Mobile Bottom Navigation (Edit / Preview / Export) */}
-      <MobileBottomNav
-        activeTab={mobileTab}
-        onChangeTab={(tab) => setMobileTab(tab)}
-        onExport={() => handleExportPDF(false)}
-      />
+      {/* Sticky Mobile Step Progression Bar */}
+      <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-md border-t border-gray-200 px-3.5 py-2 pb-[max(env(safe-area-inset-bottom,0px),0.5rem)] z-30 shadow-lg flex items-center justify-between gap-2">
+        <button
+          type="button"
+          disabled={currentStepIndex === 0}
+          onClick={handlePrevStep}
+          className="inline-flex items-center gap-1 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 disabled:opacity-30 disabled:pointer-events-none transition min-h-[48px]"
+        >
+          <ChevronLeft className="h-4 w-4" />
+          <span>Previous</span>
+        </button>
+
+        <div className="flex flex-col items-center justify-center text-center">
+          <span className="text-[10px] font-bold text-gray-400 tracking-wider">
+            {saveStatus}
+          </span>
+          <span className="text-[11px] font-bold text-indigo-700">
+            {SECTION_REGISTRY[activeSection]?.label || ""}
+          </span>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleNextStep}
+          className="inline-flex items-center gap-1 px-4 py-2.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 active:scale-[0.99] shadow-xs transition min-h-[48px]"
+        >
+          <span>
+            {currentStepIndex < visibleSections.length - 1
+              ? `Next: ${SECTION_REGISTRY[visibleSections[currentStepIndex + 1]]?.label?.split(" ")[0] || "Next"}`
+              : "Preview"}
+          </span>
+          <ChevronRight className="h-4 w-4" />
+        </button>
+      </div>
 
       {/* AI Analysis Full Report Modal */}
       {showAnalysisReport && analysisResponse && (
@@ -968,6 +1214,14 @@ export default function ResumeBuilder({ user }: ResumeBuilderProps = {}) {
           onClose={() => setShowDataModal(false)}
         />
       )}
+
+      {/* Offscreen Dedicated Render Container for 1-Page PDF Export */}
+      <div
+        className="fixed -left-[9999px] top-0 pointer-events-none opacity-0 w-[800px] z-[-100]"
+        aria-hidden="true"
+      >
+        <ResumePreview ref={offscreenPrintRef} resume={resume} />
+      </div>
     </div>
   );
 }

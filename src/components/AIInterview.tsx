@@ -21,14 +21,16 @@ import {
   selectQuestionsForSession,
 } from "../lib/interview/engine";
 import { generateAIInterviewPlan } from "../lib/interview/geminiService";
-import { loadLocalResume } from "@/lib/resume/storage";
+import { loadLocalResume } from "../lib/resume/storage";
+import { toast } from "react-hot-toast";
+import { UserRole } from "@/constants/roles";
 import InterviewSetup from "./interview/InterviewSetup";
 import InterviewThread from "./interview/InterviewThread";
 import InterviewScorecard from "./interview/InterviewScorecard";
 import InterviewHistory from "./interview/InterviewHistory";
 
 interface AIInterviewProps {
-  user?: { id?: string; name?: string; email?: string; [key: string]: any } | null;
+  user?: { id?: string; name?: string; email?: string; role?: UserRole | string; [key: string]: unknown } | null;
   onGoToDashboard?: () => void;
   onNavigateToTab?: (tabId: string) => void;
   tab?: "setup" | "session" | "scorecard" | "history";
@@ -66,7 +68,7 @@ export default function AIInterview({
       } else {
         setSessions([]);
       }
-    } catch (e) {
+    } catch (e: unknown) {
       console.warn("Failed to read session history from localStorage", e);
     }
   }, [historyKey]);
@@ -75,7 +77,7 @@ export default function AIInterview({
     setSessions(updated);
     try {
       localStorage.setItem(historyKey, JSON.stringify(updated));
-    } catch (e) {
+    } catch (e: unknown) {
       console.warn("Failed to persist session history", e);
     }
   };
@@ -118,7 +120,7 @@ export default function AIInterview({
             estimatedSeconds: 120,
           }));
         }
-      } catch (err) {
+      } catch (err: unknown) {
         console.warn("Falling back to local bank", err);
       }
     }
@@ -169,7 +171,7 @@ export default function AIInterview({
     };
 
     saveSessions([sessionRecord, ...sessions.filter((s) => s.id !== currentSessionId)]);
-    alert("Interview paused. Your progress has been saved to History.");
+    toast.success("Interview paused. Your progress has been saved to History.");
     setActiveTab("history");
   };
 
@@ -192,70 +194,80 @@ export default function AIInterview({
     }
   };
 
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+
   const handleClearAllHistory = () => {
-    if (confirm("Are you sure you want to clear all past interview history?")) {
-      saveSessions([]);
-    }
+    setShowClearConfirm(true);
   };
 
+  const confirmClearAll = () => {
+    saveSessions([]);
+    setShowClearConfirm(false);
+    toast.success("Interview history cleared.");
+  };
+
+  const isLiveSession = activeTab === "session";
+
   return (
-    <div className="space-y-6 animate-fade-in">
-      {/* Sub-Navigation Tabs */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-gray-200">
-        <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto pb-1 max-w-full">
-          <button
-            type="button"
-            onClick={() => setActiveTab("setup")}
-            className={`px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold min-h-[44px] transition flex items-center gap-2 whitespace-nowrap ${
-              activeTab === "setup"
-                ? "bg-indigo-600 text-white shadow-md shadow-indigo-100"
-                : "text-gray-600 hover:bg-indigo-50 hover:text-indigo-600"
-            }`}
-          >
-            <Sparkles className="w-4 h-4" /> Setup & Role
-          </button>
-          {currentQuestions.length > 0 && (
+    <div className={`${isLiveSession ? "h-full" : "space-y-6"} animate-fade-in`}>
+      {/* Sub-Navigation Tabs (Hidden during live session to reclaim vertical space) */}
+      {!isLiveSession && (
+        <div className="flex flex-wrap items-center justify-between gap-3 pb-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar pb-1 max-w-full">
             <button
               type="button"
-              onClick={() => setActiveTab("session")}
-              className={`px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold min-h-[44px] transition flex items-center gap-2 whitespace-nowrap ${
-                activeTab === "session"
+              onClick={() => setActiveTab("setup")}
+              className={`px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold min-h-[44px] transition flex items-center gap-2 whitespace-nowrap ${
+                activeTab === "setup"
                   ? "bg-indigo-600 text-white shadow-md shadow-indigo-100"
-                  : "text-gray-600 hover:bg-indigo-50 hover:text-indigo-600"
+                  : "bg-white text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 border border-gray-200"
               }`}
             >
-              <Play className="w-4 h-4" /> Live Session
+              <Sparkles className="w-4 h-4" />
+              <span>Setup</span>
             </button>
-          )}
-          {currentScorecard && (
+            {currentQuestions.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setActiveTab("session")}
+                className="px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold min-h-[44px] transition flex items-center gap-2 whitespace-nowrap bg-white text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 border border-gray-200"
+              >
+                <Play className="w-4 h-4" />
+                <span>Resume Live</span>
+              </button>
+            )}
+            {currentScorecard && (
+              <button
+                type="button"
+                onClick={() => setActiveTab("scorecard")}
+                className={`px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold min-h-[44px] transition flex items-center gap-2 whitespace-nowrap ${
+                  activeTab === "scorecard"
+                    ? "bg-indigo-600 text-white shadow-md shadow-indigo-100"
+                    : "bg-white text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 border border-gray-200"
+                }`}
+              >
+                <Award className="w-4 h-4" />
+                <span>Scorecard</span>
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => setActiveTab("scorecard")}
-              className={`px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold min-h-[44px] transition flex items-center gap-2 whitespace-nowrap ${
-                activeTab === "scorecard"
+              onClick={() => setActiveTab("history")}
+              className={`px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold min-h-[44px] transition flex items-center gap-2 whitespace-nowrap ${
+                activeTab === "history"
                   ? "bg-indigo-600 text-white shadow-md shadow-indigo-100"
-                  : "text-gray-600 hover:bg-indigo-50 hover:text-indigo-600"
+                  : "bg-white text-gray-700 hover:bg-indigo-50 hover:text-indigo-600 border border-gray-200"
               }`}
             >
-              <Award className="w-4 h-4" /> Scorecard
+              <History className="w-4 h-4" />
+              <span>History ({sessions.length})</span>
             </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setActiveTab("history")}
-            className={`px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold min-h-[44px] transition flex items-center gap-2 whitespace-nowrap ${
-              activeTab === "history"
-                ? "bg-indigo-600 text-white shadow-md shadow-indigo-100"
-                : "text-gray-600 hover:bg-indigo-50 hover:text-indigo-600"
-            }`}
-          >
-            <History className="w-4 h-4" /> Past Sessions ({sessions.length})
-          </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Main Content Body */}
-      <div>
+      <div className={isLiveSession ? "h-full" : ""}>
         {isInitializing && (
           <div className="bg-white rounded-3xl p-12 text-center max-w-md mx-auto border border-gray-200 shadow-sm animate-pulse space-y-3">
             <Sparkles className="w-8 h-8 text-indigo-600 mx-auto animate-spin" />
@@ -305,6 +317,34 @@ export default function AIInterview({
           />
         )}
       </div>
+
+      {/* Confirmation Modal to Clear History */}
+      {showClearConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs animate-fade-in">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-gray-150 space-y-4">
+            <h3 className="text-sm font-bold text-gray-900">Clear All Interview History?</h3>
+            <p className="text-xs text-gray-600 leading-relaxed">
+              Are you sure you want to delete all past interview sessions? This action cannot be undone.
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowClearConfirm(false)}
+                className="px-3.5 py-2 rounded-xl text-xs font-semibold text-gray-600 hover:bg-gray-100 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmClearAll}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-red-600 hover:bg-red-700 shadow-xs transition-colors"
+              >
+                Clear History
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

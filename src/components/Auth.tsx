@@ -18,16 +18,47 @@ import {
   ShieldCheck,
   Check,
   Sparkles,
+  AlertCircle,
+  Compass,
 } from "lucide-react";
 import { API_ROUTES, APP_ROUTES } from "@/constants/endpoints";
+import ResuMentorBrandLogo from "@/shared/ui/ResuMentorBrandLogo";
+import { useBackHandler, dispatchBack } from "@/shared/platform";
+import {
+  AuthMode,
+  AuthPurpose,
+  AUTH_MESSAGES,
+  AUTH_CONSTANTS,
+  AUTH_PATTERNS,
+  getErrorMessage,
+  cleanEmail as sanitizeEmail,
+} from "@/constants/auth";
 
-type AuthMode = "login" | "register" | "otp" | "forgot";
+export { AuthMode };
 
-export default function Auth() {
+export interface AuthProps {
+  initialMode?: AuthMode;
+}
+
+export default function Auth({ initialMode = AuthMode.LOGIN }: AuthProps = {}) {
   const router = useRouter();
 
-  // Mode state: 'login' | 'register' | 'otp' | 'forgot'
-  const [mode, setMode] = useState<AuthMode>("login");
+  // Mode state: Enforces AuthMode enum per project guidelines
+  const [mode, setMode] = useState<AuthMode>(initialMode);
+
+  // Sync mode with URL search params if present
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const urlMode = params.get("mode") as AuthMode | null;
+      if (
+        urlMode &&
+        Object.values(AuthMode).includes(urlMode)
+      ) {
+        setMode(urlMode);
+      }
+    }
+  }, []);
 
   // Form field states
   const [email, setEmail] = useState("");
@@ -38,8 +69,18 @@ export default function Auth() {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // Forgot password reset sent state
+  // New password states for password reset mode
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmNewPassword, setShowConfirmNewPassword] = useState(false);
+
+  // Forgot password & reset state
   const [resetSent, setResetSent] = useState(false);
+  const [forgotError, setForgotError] = useState<string | null>(null);
+  const [verifiedResetCode, setVerifiedResetCode] = useState("");
+  const [verifiedResetToken, setVerifiedResetToken] = useState("");
+  const [resetOtpError, setResetOtpError] = useState<string | null>(null);
 
   // OTP Verification segmented states
   const [otpDigits, setOtpDigits] = useState<string[]>(["", "", "", "", "", ""]);
@@ -48,12 +89,13 @@ export default function Auth() {
   const [pendingEmail, setPendingEmail] = useState("");
   const [pendingPassword, setPendingPassword] = useState("");
   const [pendingName, setPendingName] = useState("");
+  const [pendingPurpose, setPendingPurpose] = useState<AuthPurpose>(AuthPurpose.EMAIL_VERIFY);
   const [cooldown, setCooldown] = useState(0);
 
   // Field-specific validation states
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
 
-  // 60-second cooldown timer
+  // Cooldown timer
   useEffect(() => {
     if (cooldown <= 0) return;
     const interval = setInterval(() => {
@@ -62,9 +104,54 @@ export default function Auth() {
     return () => clearInterval(interval);
   }, [cooldown]);
 
-  // Focus the first OTP box when entering OTP mode
+  // Restore pendingEmail from sessionStorage on mount if lost across page refreshes
   useEffect(() => {
-    if (mode === "otp") {
+    if (typeof window !== "undefined") {
+      const savedEmail = sessionStorage.getItem("resumentor_pending_email");
+      const savedPurpose = sessionStorage.getItem("resumentor_pending_purpose") as AuthPurpose | null;
+      if (savedEmail && !pendingEmail) {
+        setPendingEmail(savedEmail);
+      }
+      if (savedPurpose && Object.values(AuthPurpose).includes(savedPurpose)) {
+        setPendingPurpose(savedPurpose);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Sync pendingEmail and purpose to sessionStorage
+  useEffect(() => {
+    if (pendingEmail && typeof window !== "undefined") {
+      sessionStorage.setItem("resumentor_pending_email", pendingEmail);
+      sessionStorage.setItem("resumentor_pending_purpose", pendingPurpose);
+    }
+  }, [pendingEmail, pendingPurpose]);
+
+  // Register in-screen back navigation for Auth flows (Entry Layer per Implementation Guide)
+  useBackHandler("in_screen", () => {
+    if (mode === AuthMode.SET_NEW_PASSWORD) {
+      setMode(AuthMode.VERIFY_RESET_OTP);
+      return true;
+    }
+    if (mode === AuthMode.VERIFY_RESET_OTP) {
+      setMode(AuthMode.FORGOT);
+      return true;
+    }
+    if (mode === AuthMode.FORGOT) {
+      setForgotError(null);
+      setMode(AuthMode.LOGIN);
+      return true;
+    }
+    if (mode === AuthMode.OTP) {
+      setMode(AuthMode.REGISTER);
+      return true;
+    }
+    return false;
+  }, [mode]);
+
+  // Focus the first OTP box when entering OTP or reset-password verification mode
+  useEffect(() => {
+    if (mode === AuthMode.OTP || mode === AuthMode.VERIFY_RESET_OTP || mode === AuthMode.RESET_PASSWORD) {
       setTimeout(() => {
         otpInputRefs.current[0]?.focus();
       }, 100);
@@ -82,26 +169,33 @@ export default function Auth() {
   const strengthColors = ["bg-red-500", "bg-amber-500", "bg-indigo-500", "bg-emerald-500"];
   const strengthTextColor = ["text-red-600", "text-amber-600", "text-indigo-600", "text-emerald-600"];
 
+  // New Password strength calculations (for password reset)
+  const newHasMinLength = newPassword.length >= 8;
+  const newHasUppercase = /[A-Z]/.test(newPassword);
+  const newHasNumber = /\d/.test(newPassword);
+  const newHasSpecial = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(newPassword);
+  const newPassedCount = [newHasMinLength, newHasUppercase, newHasNumber, newHasSpecial].filter(Boolean).length;
+
   const validateField = (field: string, value: string) => {
     let errorMsg = "";
     const cleanValue = (value || "").trim();
 
     if (!cleanValue) {
-      errorMsg = "This field is required";
+      errorMsg = AUTH_MESSAGES.FIELD_REQUIRED;
     } else {
       if (field === "fullName") {
-        if (!/^[a-zA-Z\s]+$/.test(cleanValue)) {
-          errorMsg = "Letters and spaces only, no numbers or special characters";
+        if (!AUTH_PATTERNS.LETTERS_AND_SPACES.test(cleanValue)) {
+          errorMsg = AUTH_MESSAGES.NAME_INVALID;
         }
       }
       if (field === "email") {
-        if (!/^[a-zA-Z0-9_.-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(cleanValue)) {
-          errorMsg = "Please enter a valid email address";
+        if (!AUTH_PATTERNS.EMAIL.test(cleanValue)) {
+          errorMsg = AUTH_MESSAGES.EMAIL_INVALID;
         }
       }
       if (field === "password") {
         if (passedCount < 4) {
-          errorMsg = "Please meet all password security requirements";
+          errorMsg = AUTH_MESSAGES.PASSWORD_CRITERIA;
         }
       }
     }
@@ -174,31 +268,56 @@ export default function Auth() {
     otpInputRefs.current[nextIndex]?.focus();
   };
 
+  // --- Guest Entry Handler ---
+  const handleContinueAsGuest = () => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("resumentor_guest_mode", "true");
+      sessionStorage.setItem("resumentor_guest_mode", "true");
+    }
+    toast.success("Welcome, Guest! Entering app...");
+    router.replace(`${APP_ROUTES.DASHBOARD}?guest=true`);
+  };
+
   // --- Login Handler ---
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     const isEmailValid = validateField("email", email);
     if (!isEmailValid || !password) {
-      toast.error("Please provide valid login details.");
+      toast.error(AUTH_MESSAGES.LOGIN_INVALID_DETAILS);
       return;
     }
 
     setLoading(true);
     try {
-      const cleanEmail = email.trim().toLowerCase();
-      const { data, error } = await supabase.auth.signInWithPassword({
+      const cleanEmail = sanitizeEmail(email);
+      const cleanPass = password.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+
+      let { data, error } = await supabase.auth.signInWithPassword({
         email: cleanEmail,
-        password,
+        password: cleanPass,
       });
+
+      // Mobile keyboard autofill space tolerance: retry with raw password if clean differed and failed
+      if (error && password !== cleanPass) {
+        const retryResult = await supabase.auth.signInWithPassword({
+          email: cleanEmail,
+          password,
+        });
+        if (!retryResult.error) {
+          data = retryResult.data;
+          error = null;
+        }
+      }
 
       if (error) {
         // If email confirmation is required, automatically dispatch a 6-digit OTP and switch to OTP mode
         if (error.message.toLowerCase().includes("email not confirmed")) {
           setPendingEmail(cleanEmail);
           setPendingPassword(password);
+          setPendingPurpose(AuthPurpose.EMAIL_VERIFY);
           setOtpDigits(["", "", "", "", "", ""]);
-          setMode("otp");
-          setCooldown(60);
+          setMode(AuthMode.OTP);
+          setCooldown(AUTH_CONSTANTS.OTP_COOLDOWN_SECONDS);
 
           try {
             await fetch(API_ROUTES.AUTH_SEND_OTP, {
@@ -206,14 +325,14 @@ export default function Auth() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 email: cleanEmail,
-                purpose: "EMAIL_VERIFY",
+                purpose: AuthPurpose.EMAIL_VERIFY,
               }),
             });
-          } catch (e: any) {
-            console.warn("[OTP Trigger Notice]:", e.message);
+          } catch (e: unknown) {
+            console.warn("[OTP Trigger Notice]:", getErrorMessage(e));
           }
 
-          toast("A 6-digit verification code has been sent to your email.", { icon: "✉️" });
+          toast(AUTH_MESSAGES.OTP_SENT_EMAIL_VERIFY, { icon: "✉️" });
           return;
         }
         throw error;
@@ -223,10 +342,10 @@ export default function Auth() {
         localStorage.removeItem("resumentor_resume_current");
         localStorage.removeItem("resumentor_resume_revisions");
       }
-      toast.success("Successfully logged in!");
+      toast.success(AUTH_MESSAGES.LOGIN_SUCCESS);
       router.replace(APP_ROUTES.DASHBOARD);
-    } catch (error: any) {
-      toast.error(error.message || "Invalid email or password.");
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, AUTH_MESSAGES.LOGIN_INVALID_CREDENTIALS));
     } finally {
       setLoading(false);
     }
@@ -253,46 +372,34 @@ export default function Auth() {
     try {
       const cleanEmail = email.trim().toLowerCase();
       const cleanName = fullName.trim();
+      const cleanPass = password.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
 
-      const { data, error } = await supabase.auth.signUp({
-        email: cleanEmail,
-        password,
-        options: {
-          data: {
-            name: cleanName,
-            full_name: cleanName,
-          },
-        },
+      const response = await fetch(API_ROUTES.AUTH_REGISTER, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: cleanEmail,
+          password: cleanPass,
+          name: cleanName,
+        }),
       });
 
-      if (error) throw error;
-
-      // Automatically send the 6-digit verification code using our custom Nodemailer SMTP route
-      try {
-        await fetch(API_ROUTES.AUTH_SEND_OTP, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            email: cleanEmail,
-            userId: data.user?.id,
-            name: cleanName,
-            purpose: "EMAIL_VERIFY",
-          }),
-        });
-      } catch (sendErr: any) {
-        console.warn("[Send OTP Client Notice]:", sendErr);
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || "Failed to create account.");
       }
 
-      setPendingUserId(data.user?.id || "");
+      setPendingUserId(result.userId || "");
       setPendingEmail(cleanEmail);
       setPendingPassword(password);
       setPendingName(cleanName);
+      setPendingPurpose(AuthPurpose.EMAIL_VERIFY);
       setOtpDigits(["", "", "", "", "", ""]);
-      setMode("otp");
-      setCooldown(60);
+      setMode(AuthMode.OTP);
+      setCooldown(AUTH_CONSTANTS.OTP_COOLDOWN_SECONDS);
       toast.success("Account created! A 6-digit verification code has been sent to your email.");
-    } catch (error: any) {
-      toast.error(error.message || "Error creating account.");
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, "Error creating account."));
     } finally {
       setLoading(false);
     }
@@ -311,6 +418,9 @@ export default function Auth() {
     try {
       // 1. Verify code with our backend OTP verification API
       let verifiedSuccessfully = false;
+      let sessionTokenHash: string | undefined = undefined;
+      let verificationType: string | undefined = undefined;
+
       try {
         const response = await fetch(API_ROUTES.AUTH_VERIFY_OTP, {
           method: "POST",
@@ -319,17 +429,19 @@ export default function Auth() {
             email: pendingEmail,
             userId: pendingUserId,
             code,
-            purpose: "EMAIL_VERIFY",
+            purpose: AuthPurpose.EMAIL_VERIFY,
             name: pendingName,
           }),
         });
         const result = await response.json();
         if (response.ok && result.success) {
           verifiedSuccessfully = true;
+          sessionTokenHash = result.sessionTokenHash;
+          verificationType = result.verificationType || "magiclink";
         } else {
           throw new Error(result.error || "Verification failed");
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         // Fallback: try Supabase's native verifyOtp in case token was generated natively
         const fallback = await supabase.auth.verifyOtp({
           email: pendingEmail,
@@ -348,18 +460,50 @@ export default function Auth() {
           localStorage.removeItem("resumentor_resume_current");
           localStorage.removeItem("resumentor_resume_revisions");
         }
-        // 2. Establish active session with password
-        if (pendingPassword) {
-          await supabase.auth.signInWithPassword({
-            email: pendingEmail,
-            password: pendingPassword,
-          });
+
+        // 2. Establish active session with full JWT access and refresh tokens
+        let sessionEstablished = false;
+
+        // A) Use sessionTokenHash for instant token-based login
+        if (sessionTokenHash) {
+          try {
+            const { data: sessionData, error: sessionErr } = await supabase.auth.verifyOtp({
+              token_hash: sessionTokenHash,
+              type: (verificationType as "magiclink" | "signup") || "magiclink",
+            });
+            if (!sessionErr && sessionData?.session) {
+              sessionEstablished = true;
+            }
+          } catch (tokErr: unknown) {
+            console.warn("[Token session warning]:", tokErr);
+          }
         }
-        toast.success("Email verified successfully! Welcome to ResuMentor.");
+
+        // B) Backup: sign in directly with the password entered during registration
+        if (!sessionEstablished && pendingPassword) {
+          try {
+            const { data: signInData, error: signInErr } = await supabase.auth.signInWithPassword({
+              email: pendingEmail,
+              password: pendingPassword,
+            });
+            if (!signInErr && signInData?.session) {
+              sessionEstablished = true;
+            }
+          } catch (pwdErr: unknown) {
+            console.warn("[Password sign in warning]:", pwdErr);
+          }
+        }
+
+        // Clear sensitive temporary state
+        setPendingPassword("");
+        setPassword("");
+
+        // 3. Directly transfer user to the main Dashboard screen without displaying the login screen
+        toast.success("Welcome to ResuMentor! Loading your dashboard...");
         router.replace(APP_ROUTES.DASHBOARD);
       }
-    } catch (error: any) {
-      toast.error(error.message || "Failed to verify 6-digit code.");
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, "Failed to verify 6-digit code."));
     } finally {
       setLoading(false);
     }
@@ -367,7 +511,18 @@ export default function Auth() {
 
   // --- Resend OTP Handler ---
   const handleResendOtp = async () => {
-    if (cooldown > 0) return;
+    if (cooldown > 0 || loading) return;
+
+    let targetEmail = (pendingEmail || email).trim().toLowerCase();
+    if (!targetEmail && typeof window !== "undefined") {
+      targetEmail = (sessionStorage.getItem("resumentor_pending_email") || "").trim().toLowerCase();
+    }
+
+    if (!targetEmail || !AUTH_PATTERNS.EMAIL.test(targetEmail)) {
+      toast.error(AUTH_MESSAGES.EMAIL_INVALID);
+      setMode(AuthMode.FORGOT);
+      return;
+    }
 
     setLoading(true);
     try {
@@ -375,10 +530,10 @@ export default function Auth() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          email: pendingEmail,
+          email: targetEmail,
           userId: pendingUserId,
           name: pendingName,
-          purpose: "EMAIL_VERIFY",
+          purpose: pendingPurpose,
         }),
       });
 
@@ -387,42 +542,228 @@ export default function Auth() {
         throw new Error(result.error || "Failed to resend code.");
       }
 
-      setCooldown(60);
-      toast.success("Fresh 6-digit verification code sent to your email!");
-    } catch (error: any) {
-      toast.error(error.message || "Failed to resend code.");
+      setCooldown(AUTH_CONSTANTS.OTP_COOLDOWN_SECONDS);
+      toast.success(`Fresh 6-digit verification code sent to ${targetEmail}!`);
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, "Failed to resend code."));
     } finally {
       setLoading(false);
     }
   };
 
-  // --- Forgot Password Handler ---
+  // --- Forgot Password Request Handler (Option 2: 6-Digit OTP via SMTP) ---
   const handleForgotPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      toast.error("Please enter a valid email address.");
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !AUTH_PATTERNS.EMAIL.test(cleanEmail)) {
+      toast.error(AUTH_MESSAGES.EMAIL_INVALID);
+      return;
+    }
+
+    setLoading(true);
+    setForgotError(null);
+    try {
+      const response = await fetch(API_ROUTES.AUTH_SEND_OTP, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: cleanEmail,
+          purpose: AuthPurpose.PASSWORD_RESET,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        const errorMsg = data.error || AUTH_MESSAGES.USER_NOT_FOUND;
+        setForgotError(errorMsg);
+        toast.error(errorMsg);
+        return;
+      }
+
+      setPendingEmail(cleanEmail);
+      setPendingUserId("");
+      setPendingPurpose(AuthPurpose.PASSWORD_RESET);
+      setOtpDigits(["", "", "", "", "", ""]);
+      setVerifiedResetCode("");
+      setVerifiedResetToken("");
+      if (typeof window !== "undefined") {
+        sessionStorage.removeItem("resumentor_reset_token");
+      }
+      setNewPassword("");
+      setConfirmNewPassword("");
+      setResetOtpError(null);
+      setCooldown(AUTH_CONSTANTS.OTP_COOLDOWN_SECONDS);
+      setMode(AuthMode.VERIFY_RESET_OTP);
+      toast.success(AUTH_MESSAGES.OTP_SENT_PASSWORD_RESET);
+    } catch (error: unknown) {
+      const errorMsg = getErrorMessage(error, "Failed to send reset email.");
+      setForgotError(errorMsg);
+      toast.error(errorMsg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // --- Step 1: Verify OTP Handler for Password Reset ---
+  const handleVerifyResetOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const code = otpDigits.join("");
+    if (code.length !== 6) {
+      toast.error("Please enter the complete 6-digit verification code.");
+      return;
+    }
+
+    setLoading(true);
+    setResetOtpError(null);
+    try {
+      const response = await fetch(API_ROUTES.AUTH_VERIFY_OTP, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: pendingEmail,
+          code,
+          purpose: AuthPurpose.PASSWORD_RESET,
+        }),
+      });
+
+      const result = await response.json();
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || AUTH_MESSAGES.OTP_INVALID_CODE);
+      }
+
+      // Secure reset token issued after OTP verification
+      const issuedToken = result.resetToken || "";
+      setVerifiedResetToken(issuedToken);
+      setVerifiedResetCode(code);
+      if (typeof window !== "undefined" && issuedToken) {
+        sessionStorage.setItem("resumentor_reset_token", issuedToken);
+      }
+      setMode(AuthMode.SET_NEW_PASSWORD);
+      toast.success("Code verified! Now create your new password.");
+    } catch (error: unknown) {
+      const msg = getErrorMessage(error, "Failed to verify 6-digit code.");
+      setResetOtpError(msg);
+      toast.error(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // --- Step 2: Set New Password Submit Handler ---
+  const handleSetNewPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    let tokenToUse = verifiedResetToken;
+    if (!tokenToUse && typeof window !== "undefined") {
+      tokenToUse = sessionStorage.getItem("resumentor_reset_token") || "";
+    }
+    const codeFallback = verifiedResetCode || otpDigits.join("");
+
+    if (!tokenToUse && (!codeFallback || codeFallback.length !== 6)) {
+      toast.error(AUTH_MESSAGES.RESET_TOKEN_INVALID_OR_EXPIRED);
+      setMode(AuthMode.VERIFY_RESET_OTP);
+      return;
+    }
+
+    if (newPassedCount < 4) {
+      toast.error(AUTH_MESSAGES.PASSWORD_CRITERIA);
+      return;
+    }
+
+    if (newPassword !== confirmNewPassword) {
+      toast.error(AUTH_MESSAGES.PASSWORDS_MISMATCH);
       return;
     }
 
     setLoading(true);
     try {
-      const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
-        redirectTo: typeof window !== "undefined" ? `${window.location.origin}/auth?mode=reset` : undefined,
+      const requestPayload: {
+        email: string;
+        purpose: AuthPurpose;
+        newPassword: string;
+        resetToken?: string;
+        code?: string;
+      } = {
+        email: pendingEmail,
+        purpose: AuthPurpose.PASSWORD_RESET,
+        newPassword,
+      };
+
+      if (tokenToUse) {
+        requestPayload.resetToken = tokenToUse;
+      } else {
+        requestPayload.code = codeFallback;
+      }
+
+      const response = await fetch(API_ROUTES.AUTH_VERIFY_OTP, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestPayload),
       });
 
-      if (error) throw error;
+      const result = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+        token_hash?: string;
+      };
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || AUTH_MESSAGES.PASSWORD_UPDATE_FAILED);
+      }
 
-      setResetSent(true);
-      toast.success("Password reset instructions dispatched!");
-    } catch (error: any) {
-      toast.error(error.message || "Failed to send reset email.");
+      if (typeof window !== "undefined") {
+        sessionStorage.removeItem("resumentor_reset_token");
+      }
+
+      const sessionTokenHash = typeof result.token_hash === "string" ? result.token_hash : null;
+      let sessionEstablished = false;
+
+      // 1. Primary: activate session using backend-issued magiclink token_hash
+      if (sessionTokenHash) {
+        try {
+          const { data: sessionData, error: sessionErr } = await supabase.auth.verifyOtp({
+            token_hash: sessionTokenHash,
+            type: "magiclink",
+          });
+          if (!sessionErr && sessionData?.session) {
+            sessionEstablished = true;
+          }
+        } catch (tokErr: unknown) {
+          console.warn("[Token session warning]:", tokErr);
+        }
+      }
+
+      // 2. Backup: sign in directly with the new password
+      if (!sessionEstablished) {
+        try {
+          const cleanPass = newPassword.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+          const { data: signInData, error: signInErr } = await supabase.auth.signInWithPassword({
+            email: pendingEmail,
+            password: cleanPass,
+          });
+          if (!signInErr && signInData?.session) {
+            sessionEstablished = true;
+          }
+        } catch (pwdErr: unknown) {
+          console.warn("[Password sign in warning]:", pwdErr);
+        }
+      }
+
+      if (typeof window !== "undefined") {
+        localStorage.removeItem("resumentor_resume_current");
+        localStorage.removeItem("resumentor_resume_revisions");
+      }
+
+      // Direct seamless transition to dashboard
+      toast.success(AUTH_MESSAGES.PASSWORD_RESET_SUCCESS);
+      router.replace(APP_ROUTES.DASHBOARD);
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, AUTH_MESSAGES.PASSWORD_UPDATE_FAILED));
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-dvh flex items-center justify-center p-4 pt-safe pb-safe bg-gradient-to-br from-indigo-50/70 via-slate-50 to-teal-50/40 relative overflow-hidden">
+    <div className="min-h-dvh flex items-center justify-center p-4 pt-safe pb-safe bg-gradient-to-br from-indigo-50/70 via-slate-50 to-teal-50/40 relative overflow-y-auto">
       {/* Decorative ambient background glows */}
       <div className="absolute top-[-10%] left-[-10%] w-96 h-96 bg-indigo-200/30 rounded-full blur-3xl pointer-events-none" />
       <div className="absolute bottom-[-10%] right-[-10%] w-96 h-96 bg-teal-200/25 rounded-full blur-3xl pointer-events-none" />
@@ -431,22 +772,15 @@ export default function Auth() {
       <div className="w-full max-w-md bg-white/95 backdrop-blur-md p-7 sm:p-10 rounded-3xl shadow-2xl shadow-indigo-100/50 border border-slate-100/80 transition-all duration-300 relative z-10">
         
         {/* Brand Banner Header */}
-        <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center bg-indigo-600 text-white p-3 rounded-2xl shadow-md shadow-indigo-200 mb-3">
-            <GraduationCap className="h-8 w-8" />
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-            ResuMentor
-          </h1>
-          <p className="text-xs font-medium text-slate-500 mt-0.5">
+        <div className="text-center mb-6 flex flex-col items-center">
+          <ResuMentorBrandLogo variant="ready" colorScheme="indigo" size={48} showWordmark={true} theme="light" />
+          <p className="text-xs font-semibold text-slate-500 mt-2">
             AI-Powered Career &amp; Student Portal
           </p>
         </div>
 
-        {/* =========================================================================
-            SCREEN 1: OTP Verification Screen
-            ========================================================================= */}
-        {mode === "otp" && (
+        {/* SCREEN 1: OTP Verification Screen */}
+        {mode === AuthMode.OTP && (
           <div className="animate-fade-in">
             <div className="text-center mb-6">
               <div className="inline-flex p-2.5 bg-indigo-50 border border-indigo-100 rounded-full text-indigo-600 mb-2">
@@ -504,9 +838,9 @@ export default function Auth() {
                 type="button"
                 disabled={cooldown > 0 || loading}
                 onClick={handleResendOtp}
-                className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 disabled:text-slate-400 disabled:no-underline inline-flex items-center space-x-1.5 transition"
+                className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 disabled:text-slate-400 disabled:no-underline inline-flex items-center space-x-1.5 transition min-h-[32px] px-2 rounded-lg"
               >
-                <RotateCcw className={`h-3.5 w-3.5 ${cooldown > 0 ? "animate-spin" : ""}`} />
+                <RotateCcw className={`h-3.5 w-3.5 ${loading ? "animate-spin text-indigo-600" : ""}`} />
                 <span>
                   {cooldown > 0 ? `Resend Code in ${cooldown}s` : "Didn't receive code? Resend"}
                 </span>
@@ -517,20 +851,18 @@ export default function Auth() {
             <div className="mt-6 pt-4 border-t border-slate-100 text-center">
               <button
                 type="button"
-                onClick={() => setMode("login")}
-                className="text-xs font-medium text-slate-500 hover:text-slate-800 inline-flex items-center space-x-1.5 transition"
+                onClick={() => dispatchBack()}
+                className="text-xs font-medium text-slate-500 hover:text-slate-800 inline-flex items-center space-x-1.5 transition min-h-[36px]"
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
-                <span>Back to Login</span>
+                <span>Back to Sign Up</span>
               </button>
             </div>
           </div>
         )}
 
-        {/* =========================================================================
-            SCREEN 2: Forgot Password Screen
-            ========================================================================= */}
-        {mode === "forgot" && (
+        {/* SCREEN 2: Forgot Password Screen */}
+        {mode === AuthMode.FORGOT && (
           <div className="animate-fade-in">
             <div className="text-center mb-6">
               <div className="inline-flex p-2.5 bg-amber-50 border border-amber-100 rounded-full text-amber-600 mb-2">
@@ -538,83 +870,327 @@ export default function Auth() {
               </div>
               <h2 className="text-xl font-bold text-slate-900">Reset Password</h2>
               <p className="text-xs text-slate-500 mt-1">
-                Enter your registered email address and we&apos;ll send you recovery instructions.
+                Enter your registered email address and we&apos;ll send you a secure 6-digit verification code.
               </p>
             </div>
 
-            {resetSent ? (
-              <div className="text-center py-4 space-y-4">
-                <div className="inline-flex p-3 bg-emerald-50 text-emerald-600 rounded-full">
-                  <CheckCircle2 className="h-8 w-8" />
+            {/* Prominent Account Not Found / Error Banner */}
+            {forgotError && (
+              <div className="mb-4 p-3.5 bg-rose-50 border border-rose-200 rounded-xl flex items-start space-x-3 text-left animate-fade-in shadow-sm">
+                <AlertCircle className="h-5 w-5 text-rose-500 shrink-0 mt-0.5" />
+                <div className="text-xs">
+                  <p className="font-semibold text-rose-900">Account Not Found</p>
+                  <p className="text-rose-700 mt-0.5 leading-relaxed">{forgotError}</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setErrors({});
+                      setForgotError(null);
+                      setMode(AuthMode.REGISTER);
+                    }}
+                    className="mt-2 font-semibold text-indigo-700 hover:text-indigo-900 underline inline-flex items-center space-x-1"
+                  >
+                    <span>Create a new account with this email &rarr;</span>
+                  </button>
                 </div>
-                <h3 className="text-base font-semibold text-slate-900">Check Your Inbox</h3>
-                <p className="text-xs text-slate-500 px-4">
-                  We&apos;ve sent password reset instructions to <strong className="text-slate-700">{email}</strong>.
-                  Please check your spam or junk folder if you don&apos;t see it shortly.
-                </p>
+              </div>
+            )}
+
+            <form onSubmit={handleForgotPasswordSubmit} className="space-y-4">
+              <div className="relative">
+                <Mail className="absolute top-3.5 left-4 h-5 w-5 text-slate-400" />
+                <input
+                  type="email"
+                  placeholder="Enter your registered email"
+                  value={email}
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    if (forgotError) setForgotError(null);
+                  }}
+                  required
+                  className={`w-full pl-11 pr-4 py-3 border rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/50 ${
+                    forgotError ? "border-rose-400 ring-1 ring-rose-200" : "border-slate-200"
+                  }`}
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full bg-indigo-600 text-white font-semibold py-3 px-4 rounded-xl hover:bg-indigo-700 transition duration-150 disabled:opacity-50 text-sm shadow-md shadow-indigo-200"
+              >
+                {loading ? "Checking Account & Sending Code..." : "Send 6-Digit Code"}
+              </button>
+
+              <div className="text-center pt-2">
                 <button
                   type="button"
                   onClick={() => {
-                    setResetSent(false);
-                    setMode("login");
+                    setForgotError(null);
+                    setMode(AuthMode.LOGIN);
                   }}
-                  className="w-full mt-4 bg-indigo-600 text-white font-semibold py-2.5 px-4 rounded-xl hover:bg-indigo-700 transition text-sm"
+                  className="text-xs font-semibold text-slate-500 hover:text-slate-800 inline-flex items-center space-x-1 transition"
                 >
-                  Return to Login
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                  <span>Back to Login</span>
                 </button>
               </div>
-            ) : (
-              <form onSubmit={handleForgotPasswordSubmit} className="space-y-4">
-                <div className="relative">
-                  <Mail className="absolute top-3.5 left-4 h-5 w-5 text-slate-400" />
-                  <input
-                    type="email"
-                    placeholder="Enter your registered email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    required
-                    className="w-full pl-11 pr-4 py-3 border border-slate-200 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/50"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full bg-indigo-600 text-white font-semibold py-3 px-4 rounded-xl hover:bg-indigo-700 transition duration-150 disabled:opacity-50 text-sm shadow-md shadow-indigo-200"
-                >
-                  {loading ? "Sending link..." : "Send Recovery Link"}
-                </button>
-
-                <div className="text-center pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setMode("login")}
-                    className="text-xs font-semibold text-slate-500 hover:text-slate-800 inline-flex items-center space-x-1 transition"
-                  >
-                    <ArrowLeft className="h-3.5 w-3.5" />
-                    <span>Back to Login</span>
-                  </button>
-                </div>
-              </form>
-            )}
+            </form>
           </div>
         )}
 
-        {/* =========================================================================
-            SCREEN 3 & 4: Login / Sign Up Tabs Screen
-            ========================================================================= */}
-        {(mode === "login" || mode === "register") && (
+        {/* SCREEN 3A: Step 1 - Verify Password Reset OTP */}
+        {(mode === AuthMode.VERIFY_RESET_OTP || mode === AuthMode.RESET_PASSWORD) && (
+          <div className="animate-fade-in">
+            <div className="text-center mb-6">
+              <div className="inline-flex p-2.5 bg-indigo-50 border border-indigo-100 rounded-full text-indigo-600 mb-2">
+                <KeyRound className="h-6 w-6" />
+              </div>
+              <h2 className="text-xl font-bold text-slate-900">Verify Reset Code</h2>
+              <p className="text-xs text-slate-500 mt-1">
+                Step 1 of 2: Enter the 6-digit code sent to
+                <br />
+                <span className="font-semibold text-slate-800 break-all">{pendingEmail}</span>
+              </p>
+            </div>
+
+            {/* Inline Error Message */}
+            {resetOtpError && (
+              <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-center space-x-2.5 text-left animate-fade-in">
+                <AlertCircle className="h-4 w-4 text-rose-500 shrink-0" />
+                <p className="text-xs text-rose-700 font-medium">{resetOtpError}</p>
+              </div>
+            )}
+
+            <form onSubmit={handleVerifyResetOtp} className="space-y-4">
+              {/* 6 Segmented Digit Boxes */}
+              <div>
+                <label className="block text-xs uppercase font-semibold text-slate-400 mb-2 text-center tracking-wider">
+                  6-Digit Verification Code
+                </label>
+                <div className="flex justify-center gap-1.5 sm:gap-2.5 max-w-full">
+                  {otpDigits.map((digit, idx) => (
+                    <input
+                      key={idx}
+                      ref={(el) => {
+                        otpInputRefs.current[idx] = el;
+                      }}
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      maxLength={1}
+                      value={digit}
+                      onChange={(e) => {
+                        handleOtpChange(idx, e.target.value);
+                        if (resetOtpError) setResetOtpError(null);
+                      }}
+                      onKeyDown={(e) => handleOtpKeyDown(idx, e)}
+                      onPaste={handleOtpPaste}
+                      className="w-10 h-12 sm:w-12 sm:h-14 text-center text-lg sm:text-xl font-bold font-mono rounded-xl border border-slate-200 bg-slate-50/70 text-slate-900 focus:bg-white focus:border-indigo-600 focus:ring-4 focus:ring-indigo-100 outline-none transition-all duration-150 shrink-0"
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* Verify Code Button */}
+              <button
+                type="submit"
+                disabled={loading || otpDigits.join("").length !== 6}
+                className="w-full bg-indigo-600 text-white font-semibold py-3 px-4 rounded-xl hover:bg-indigo-700 active:scale-[0.99] transition duration-150 disabled:opacity-50 shadow-md shadow-indigo-200 flex items-center justify-center space-x-2 text-sm"
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                <span>{loading ? "Verifying Code..." : "Verify Code & Proceed"}</span>
+              </button>
+            </form>
+
+            {/* Resend OTP with Cooldown Pill */}
+            <div className="mt-5 text-center">
+              <button
+                type="button"
+                disabled={cooldown > 0 || loading}
+                onClick={handleResendOtp}
+                className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 disabled:text-slate-400 disabled:no-underline inline-flex items-center space-x-1.5 transition min-h-[32px] px-2 rounded-lg"
+              >
+                <RotateCcw className={`h-3.5 w-3.5 ${loading ? "animate-spin text-indigo-600" : ""}`} />
+                <span>
+                  {cooldown > 0 ? `Resend Code in ${cooldown}s` : "Didn't receive code? Resend"}
+                </span>
+              </button>
+            </div>
+
+            {/* Change Email or Back to Login */}
+            <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+              <button
+                type="button"
+                onClick={() => dispatchBack()}
+                className="hover:text-indigo-600 inline-flex items-center space-x-1 transition min-h-[36px]"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                <span>Change Email</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setForgotError(null);
+                  setMode(AuthMode.LOGIN);
+                }}
+                className="hover:text-slate-800 transition min-h-[36px]"
+              >
+                Back to Sign In
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* SCREEN 3B: Step 2 - Create New Password */}
+        {mode === AuthMode.SET_NEW_PASSWORD && (
+          <div className="animate-fade-in">
+            <div className="text-center mb-6">
+              <div className="inline-flex p-2.5 bg-emerald-50 border border-emerald-100 rounded-full text-emerald-600 mb-2">
+                <ShieldCheck className="h-6 w-6" />
+              </div>
+              <h2 className="text-xl font-bold text-slate-900">Create New Password</h2>
+              <p className="text-xs text-slate-500 mt-1">
+                Step 2 of 2: Code verified! Choose a strong password for
+                <br />
+                <span className="font-semibold text-slate-800 break-all">{pendingEmail}</span>
+              </p>
+            </div>
+
+            <form onSubmit={handleSetNewPasswordSubmit} className="space-y-4">
+              {/* New Password Input */}
+              <div className="space-y-1">
+                <div className="relative">
+                  <Lock className="absolute top-3.5 left-4 h-5 w-5 text-slate-400" />
+                  <input
+                    type={showNewPassword ? "text" : "password"}
+                    placeholder="New Password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    required
+                    autoComplete="new-password"
+                    className="w-full pl-11 pr-11 py-3 border border-slate-200 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/50"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPassword(!showNewPassword)}
+                    className="absolute top-3.5 right-4 h-5 w-5 text-slate-400 hover:text-slate-600"
+                  >
+                    {showNewPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+
+                {/* Password Strength Meter & Interactive Requirements */}
+                {newPassword.length > 0 && (
+                  <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3 space-y-2 mt-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-500 font-medium">Strength:</span>
+                      <span className={`font-semibold ${newPassedCount > 0 ? strengthTextColor[newPassedCount - 1] : "text-slate-400"}`}>
+                        {newPassedCount > 0 ? strengthLabels[newPassedCount - 1] : "Too Weak"}
+                      </span>
+                    </div>
+
+                    <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden flex">
+                      {[1, 2, 3, 4].map((step) => (
+                        <div
+                          key={step}
+                          className={`h-full flex-1 transition-all duration-300 ${
+                            newPassedCount >= step ? strengthColors[newPassedCount - 1] : "bg-transparent"
+                          }`}
+                        />
+                      ))}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-1.5 pt-1 text-[11px]">
+                      <div className={`flex items-center space-x-1 ${newHasMinLength ? "text-emerald-600 font-semibold" : "text-slate-400"}`}>
+                        {newHasMinLength ? <Check className="h-3 w-3" /> : <span className="w-3 text-center">•</span>}
+                        <span>8+ Characters</span>
+                      </div>
+                      <div className={`flex items-center space-x-1 ${newHasUppercase ? "text-emerald-600 font-semibold" : "text-slate-400"}`}>
+                        {newHasUppercase ? <Check className="h-3 w-3" /> : <span className="w-3 text-center">•</span>}
+                        <span>1 Uppercase</span>
+                      </div>
+                      <div className={`flex items-center space-x-1 ${newHasNumber ? "text-emerald-600 font-semibold" : "text-slate-400"}`}>
+                        {newHasNumber ? <Check className="h-3 w-3" /> : <span className="w-3 text-center">•</span>}
+                        <span>1 Number</span>
+                      </div>
+                      <div className={`flex items-center space-x-1 ${newHasSpecial ? "text-emerald-600 font-semibold" : "text-slate-400"}`}>
+                        {newHasSpecial ? <Check className="h-3 w-3" /> : <span className="w-3 text-center">•</span>}
+                        <span>1 Symbol</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Confirm New Password Input */}
+              <div className="space-y-1">
+                <div className="relative">
+                  <Lock className="absolute top-3.5 left-4 h-5 w-5 text-slate-400" />
+                  <input
+                    type={showConfirmNewPassword ? "text" : "password"}
+                    placeholder="Confirm New Password"
+                    value={confirmNewPassword}
+                    onChange={(e) => setConfirmNewPassword(e.target.value)}
+                    required
+                    autoComplete="new-password"
+                    className="w-full pl-11 pr-11 py-3 border border-slate-200 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/50"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmNewPassword(!showConfirmNewPassword)}
+                    className="absolute top-3.5 right-4 h-5 w-5 text-slate-400 hover:text-slate-600"
+                  >
+                    {showConfirmNewPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+
+                {/* Password Match Status */}
+                {confirmNewPassword.length > 0 && (
+                  <p className={`text-xs ${newPassword === confirmNewPassword ? "text-emerald-600" : "text-rose-500"} font-medium`}>
+                    {newPassword === confirmNewPassword ? "✓ Passwords match" : "✕ Passwords do not match"}
+                  </p>
+                )}
+              </div>
+
+              {/* Submit Button */}
+              <button
+                type="submit"
+                disabled={loading || newPassedCount < 4 || newPassword !== confirmNewPassword}
+                className="w-full bg-indigo-600 text-white font-semibold py-3 px-4 rounded-xl hover:bg-indigo-700 active:scale-[0.99] transition duration-150 disabled:opacity-50 shadow-md shadow-indigo-200 flex items-center justify-center space-x-2 text-sm"
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                <span>{loading ? "Updating Password..." : "Update Password & Sign In"}</span>
+              </button>
+            </form>
+
+            {/* Back to Previous Step */}
+            <div className="mt-6 pt-4 border-t border-slate-100 text-center">
+              <button
+                type="button"
+                onClick={() => dispatchBack()}
+                className="text-xs font-medium text-slate-500 hover:text-slate-800 inline-flex items-center space-x-1.5 transition min-h-[36px]"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                <span>Back to Verify Code</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* SCREEN 3 & 4: Login / Sign Up Tabs Screen */}
+        {(mode === AuthMode.LOGIN || mode === AuthMode.REGISTER) && (
           <div>
             {/* Segmented Top Tabs */}
             <div className="flex bg-slate-100/80 p-1 rounded-xl mb-6 border border-slate-200/60">
               <button
                 type="button"
                 onClick={() => {
-                  setMode("login");
+                  setMode(AuthMode.LOGIN);
                   setErrors({});
                 }}
                 className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all duration-200 ${
-                  mode === "login"
+                  mode === AuthMode.LOGIN
                     ? "bg-white text-indigo-600 shadow-sm"
                     : "text-slate-600 hover:text-slate-900"
                 }`}
@@ -624,11 +1200,11 @@ export default function Auth() {
               <button
                 type="button"
                 onClick={() => {
-                  setMode("register");
+                  setMode(AuthMode.REGISTER);
                   setErrors({});
                 }}
                 className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all duration-200 ${
-                  mode === "register"
+                  mode === AuthMode.REGISTER
                     ? "bg-white text-indigo-600 shadow-sm"
                     : "text-slate-600 hover:text-slate-900"
                 }`}
@@ -638,7 +1214,7 @@ export default function Auth() {
             </div>
 
             {/* Login Form */}
-            {mode === "login" && (
+            {mode === AuthMode.LOGIN && (
               <form onSubmit={handleLogin} className="space-y-4 animate-fade-in">
                 <div className="relative">
                   <Mail className="absolute top-3.5 left-4 h-5 w-5 text-slate-400" />
@@ -649,6 +1225,7 @@ export default function Auth() {
                     onChange={(e) => handleChange("email", e.target.value, setEmail)}
                     onBlur={(e) => handleBlur("email", e.target.value)}
                     required
+                    autoComplete="username"
                     className={`w-full pl-11 pr-4 py-3 border rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/50 ${
                       errors.email ? "border-red-500 ring-1 ring-red-200" : "border-slate-200"
                     }`}
@@ -666,6 +1243,7 @@ export default function Auth() {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
+                    autoComplete="current-password"
                     className="w-full pl-11 pr-11 py-3 border border-slate-200 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/50"
                   />
                   <button
@@ -682,7 +1260,7 @@ export default function Auth() {
                     type="button"
                     onClick={() => {
                       setResetSent(false);
-                      setMode("forgot");
+                      setMode(AuthMode.FORGOT);
                     }}
                     className="text-xs font-semibold text-indigo-600 hover:underline"
                   >
@@ -701,7 +1279,7 @@ export default function Auth() {
             )}
 
             {/* Register Form */}
-            {mode === "register" && (
+            {mode === AuthMode.REGISTER && (
               <form onSubmit={handleRegister} className="space-y-3.5 animate-fade-in">
                 <div className="relative">
                   <User className="absolute top-3.5 left-4 h-5 w-5 text-slate-400" />
@@ -712,6 +1290,7 @@ export default function Auth() {
                     onChange={(e) => handleChange("fullName", e.target.value, setFullName)}
                     onBlur={(e) => handleBlur("fullName", e.target.value)}
                     required
+                    autoComplete="name"
                     className={`w-full pl-11 pr-4 py-3 border rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/50 ${
                       errors.fullName ? "border-red-500 ring-1 ring-red-200" : "border-slate-200"
                     }`}
@@ -730,6 +1309,7 @@ export default function Auth() {
                     onChange={(e) => handleChange("email", e.target.value, setEmail)}
                     onBlur={(e) => handleBlur("email", e.target.value)}
                     required
+                    autoComplete="username"
                     className={`w-full pl-11 pr-4 py-3 border rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/50 ${
                       errors.email ? "border-red-500 ring-1 ring-red-200" : "border-slate-200"
                     }`}
@@ -747,6 +1327,7 @@ export default function Auth() {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
+                    autoComplete="new-password"
                     className="w-full pl-11 pr-11 py-3 border border-slate-200 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/50"
                   />
                   <button
@@ -810,6 +1391,7 @@ export default function Auth() {
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     required
+                    autoComplete="new-password"
                     className="w-full pl-11 pr-11 py-3 border border-slate-200 rounded-xl text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50/50"
                   />
                   <button
@@ -831,6 +1413,21 @@ export default function Auth() {
                 </button>
               </form>
             )}
+
+            {/* Guest Entry Option */}
+            <div className="mt-5 pt-4 border-t border-slate-100 text-center">
+              <button
+                type="button"
+                onClick={handleContinueAsGuest}
+                className="w-full py-2.5 px-4 rounded-xl border border-slate-200 hover:border-indigo-300 bg-slate-50 hover:bg-indigo-50/50 text-slate-700 hover:text-indigo-600 text-xs sm:text-sm font-semibold transition flex items-center justify-center gap-2"
+              >
+                <Compass className="h-4 w-4 text-indigo-500" />
+                <span>Explore App as Guest &rarr;</span>
+              </button>
+              <p className="text-[11px] text-slate-400 mt-1.5">
+                Browse roadmaps, scholarships, and jobs without an account
+              </p>
+            </div>
           </div>
         )}
       </div>

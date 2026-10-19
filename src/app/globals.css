@@ -24,6 +24,12 @@
     --input: 214.3 31.8% 91.4%;
     --ring: 238.7 83.5% 66.7%;
     --radius: 0.75rem;
+
+    /* Material 3 & Android 15/16 Edge-to-Edge Safe Area Inset Tokens (Rule 01 & 03) */
+    --sat: env(safe-area-inset-top, 0px);
+    --sab: env(safe-area-inset-bottom, 0px);
+    --sal: env(safe-area-inset-left, 0px);
+    --sar: env(safe-area-inset-right, 0px);
   }
 
   body {
@@ -40,24 +46,41 @@
   }
 }
 
-/* Safe Area Insets for Mobile Notches, Status Bars and Gesture Bars (UX-05) */
+/* Safe Area Insets for Mobile Notches, Status Bars and Gesture Bars (UX-05, Rule 01 & 03) */
 .pt-safe {
-  padding-top: env(safe-area-inset-top, 0px);
+  padding-top: var(--sat, env(safe-area-inset-top, 0px));
 }
 .pb-safe {
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-bottom: var(--sab, env(safe-area-inset-bottom, 0px));
 }
 .pl-safe {
-  padding-left: env(safe-area-inset-left, 0px);
+  padding-left: var(--sal, env(safe-area-inset-left, 0px));
 }
 .pr-safe {
-  padding-right: env(safe-area-inset-right, 0px);
+  padding-right: var(--sar, env(safe-area-inset-right, 0px));
 }
 .top-safe {
-  top: env(safe-area-inset-top, 0px);
+  top: var(--sat, env(safe-area-inset-top, 0px));
 }
 .bottom-safe {
-  bottom: env(safe-area-inset-bottom, 0px);
+  bottom: var(--sab, env(safe-area-inset-bottom, 0px));
+}
+
+/* Global Mobile Virtual Keyboard Handling:
+   Automatically hide bottom navigation bars, tab bars, and elements marked to hide when keyboard is open */
+body[data-keyboard-open="true"] nav.fixed.bottom-0,
+body[data-keyboard-open="true"] .mobile-bottom-nav,
+body[data-keyboard-open="true"] [data-hide-on-keyboard="true"],
+body[data-keyboard-open="true"] .hide-on-keyboard,
+body.keyboard-open nav.fixed.bottom-0,
+body.keyboard-open .mobile-bottom-nav,
+body.keyboard-open [data-hide-on-keyboard="true"],
+body.keyboard-open .hide-on-keyboard {
+  display: none !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  transform: translateY(100%) !important;
 }
 
 @keyframes fadeIn {
@@ -73,6 +96,44 @@
 
 .animate-fade-in {
   animation: fadeIn 0.3s ease-out;
+}
+
+/* Luxurious Skeleton & Loader Shimmer */
+@keyframes luxuryShimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.luxury-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(241, 245, 249, 0.9) 0%,
+    rgba(226, 232, 240, 0.45) 25%,
+    rgba(255, 255, 255, 0.95) 50%,
+    rgba(226, 232, 240, 0.45) 75%,
+    rgba(241, 245, 249, 0.9) 100%
+  );
+  background-size: 200% 100%;
+  animation: luxuryShimmer 2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes luxuryGlow {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.8;
+    transform: scale(1.05);
+  }
+}
+
+.luxury-glow {
+  animation: luxuryGlow 3s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -105,4 +166,76 @@
 
 ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
+}
+
+/* =========================================================================
+   Global Safe-Area Toast Notch & Status Bar Protection (Mobile UX)
+   Guarantees that toasts anywhere in the app never overlap notches,
+   Dynamic Islands, camera cutouts, or system status bars across all screens.
+   ========================================================================= */
+div[data-hot-toast-container],
+div:has(> [data-hot-toast-container]),
+div[style*="z-index: 9999"],
+.react-hot-toast-container {
+  top: max(68px, calc(env(safe-area-inset-top, 0px) + 20px)) !important;
+  pointer-events: none !important;
+}
+
+.resumentor-global-toast,
+div[data-hot-toast-container] > div,
+div[style*="z-index: 9999"] > div {
+  pointer-events: auto !important;
+  margin-top: 4px;
+}
+
+/* =========================================================================
+   Global Print Stylesheet for Native Spooler & Browser Print-to-PDF
+   ========================================================================= */
+@media print {
+  /* Hide all app chrome, buttons, modals, and toasts */
+  header,
+  nav,
+  footer,
+  aside,
+  button,
+  .mobile-bottom-nav,
+  .no-print,
+  [data-no-print="true"],
+  div[data-hot-toast-container],
+  div[style*="z-index: 9999"] {
+    display: none !important;
+  }
+
+  /* Reset document flow and typography */
+  html,
+  body {
+    background: #ffffff !important;
+    color: #111827 !important;
+    overflow: visible !important;
+    height: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Force offscreen printable container to format as clean A4 document */
+  .printable-document {
+    display: block !important;
+    position: static !important;
+    left: auto !important;
+    top: auto !important;
+    opacity: 1 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 1.5cm !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    box-shadow: none !important;
+  }
+
+  @page {
+    margin: 1.2cm;
+    size: A4 portrait;
+  }
 }

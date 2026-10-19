@@ -1,20 +1,26 @@
 import {
   ResumeData,
   RESUME_SCHEMA_VERSION,
+  TemplateId,
 } from "@/types/resume";
 import { DEFAULT_SECTION_ORDER, DEFAULT_SECTION_VISIBILITY } from "./registry";
 
 export function createEmptyResume(initialUser?: { name?: string; email?: string }): ResumeData {
   const now = new Date().toISOString();
-  const userName = initialUser?.name?.trim() || "";
-  const userEmail = initialUser?.email?.trim() || "";
+  const rawName = initialUser?.name?.trim() || "";
+  const rawEmail = initialUser?.email?.trim() || "";
+  const isGuestPlaceholder =
+    rawName.toLowerCase() === "guest explorer" ||
+    rawEmail.toLowerCase() === "guest@resumentor.app";
+  const userName = isGuestPlaceholder ? "" : rawName;
+  const userEmail = isGuestPlaceholder ? "" : rawEmail;
   return {
     meta: {
       id: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `resume_${Date.now()}`,
       schemaVersion: RESUME_SCHEMA_VERSION,
       createdAt: now,
       updatedAt: now,
-      title: userName ? `${userName}'s Resume` : "Untitled Resume",
+      title: userName ? `${userName}'s Resume` : "My Resume",
       selectedTemplate: "classic",
       pageSize: "A4",
       fontScale: "medium",
@@ -61,8 +67,18 @@ export function createEmptyResume(initialUser?: { name?: string; email?: string 
   };
 }
 
-export function createSampleResume(): ResumeData {
+const TEMPLATE_ACCENT_MAP: Record<string, string> = {
+  classic: "#1e3a8a",   // Accessible Navy
+  modern: "#0f766e",    // Accessible Teal
+  compact: "#334155",   // Slate
+  academic: "#18181b",  // Charcoal / Black
+  minimalist: "#475569",// Cool Neutral
+  creative: "#7c3aed",  // Modern Indigo / Violet
+};
+
+export function createSampleResume(templateId: TemplateId = "modern"): ResumeData {
   const now = new Date().toISOString();
+  const accent = TEMPLATE_ACCENT_MAP[templateId] || "#0f766e";
   return {
     meta: {
       id: "sample_resume_001",
@@ -70,10 +86,10 @@ export function createSampleResume(): ResumeData {
       createdAt: now,
       updatedAt: now,
       title: "Alex Morgan - Senior Full Stack Engineer",
-      selectedTemplate: "modern",
+      selectedTemplate: templateId,
       pageSize: "A4",
       fontScale: "medium",
-      accentColor: "#0f766e", // Accessible Teal
+      accentColor: accent,
       dateFormat: "MMM YYYY",
       language: "en",
       sectionOrder: [...DEFAULT_SECTION_ORDER],
@@ -227,41 +243,64 @@ export function createSampleResume(): ResumeData {
 /**
  * Migration helper to ensure imported data or old saved formats upgrade cleanly to schema v1
  */
-export function migrateResumeSchema(raw: any): ResumeData {
+export function migrateResumeSchema(raw: unknown): ResumeData {
   const fallback = createEmptyResume();
   if (!raw || typeof raw !== "object") return fallback;
+  const obj = raw as Record<string, unknown>;
+  const rawMeta = obj.meta && typeof obj.meta === "object" ? (obj.meta as Record<string, unknown>) : {};
+  const rawContact = obj.contact && typeof obj.contact === "object" ? (obj.contact as Record<string, unknown>) : {};
+  const rawSkills = obj.skills && typeof obj.skills === "object" ? (obj.skills as Record<string, unknown>) : {};
+
+  // Rule 00 & Rule 05: Cleanse guest placeholders so real form fields are never prefilled with fake data
+  const migratedContact = {
+    ...fallback.contact,
+    ...(rawContact as unknown as typeof fallback.contact),
+  };
+  const rawFullName = typeof migratedContact.fullName === "string" ? migratedContact.fullName.trim() : "";
+  const rawContactEmail = typeof migratedContact.email === "string" ? migratedContact.email.trim() : "";
+  if (rawFullName.toLowerCase() === "guest explorer") {
+    migratedContact.fullName = "";
+  }
+  if (rawContactEmail.toLowerCase() === "guest@resumentor.app") {
+    migratedContact.email = "";
+  }
+
+  const rawTitle = typeof rawMeta.title === "string" ? rawMeta.title.trim() : "";
+  const cleanedTitle = rawTitle.toLowerCase().includes("guest explorer")
+    ? "My Resume"
+    : rawTitle || fallback.meta.title;
 
   return {
     meta: {
       ...fallback.meta,
-      ...(raw.meta || {}),
+      ...(rawMeta as unknown as typeof fallback.meta),
+      title: cleanedTitle,
       schemaVersion: RESUME_SCHEMA_VERSION,
       updatedAt: new Date().toISOString(),
-      sectionOrder: Array.isArray(raw.meta?.sectionOrder) ? raw.meta.sectionOrder : fallback.meta.sectionOrder,
+      sectionOrder: Array.isArray(rawMeta.sectionOrder)
+        ? (rawMeta.sectionOrder as ResumeData["meta"]["sectionOrder"])
+        : fallback.meta.sectionOrder,
       sectionVisibility: {
         ...fallback.meta.sectionVisibility,
-        ...(raw.meta?.sectionVisibility || {}),
+        ...((rawMeta.sectionVisibility as Record<string, boolean>) || {}),
       },
     },
-    contact: {
-      ...fallback.contact,
-      ...(raw.contact || {}),
-    },
-    summary: typeof raw.summary === "string" ? raw.summary : fallback.summary,
-    experience: Array.isArray(raw.experience) ? raw.experience : fallback.experience,
-    education: Array.isArray(raw.education) ? raw.education : fallback.education,
+    contact: migratedContact,
+    summary: typeof obj.summary === "string" ? obj.summary : fallback.summary,
+    experience: Array.isArray(obj.experience) ? (obj.experience as ResumeData["experience"]) : fallback.experience,
+    education: Array.isArray(obj.education) ? (obj.education as ResumeData["education"]) : fallback.education,
     skills: {
       ...fallback.skills,
-      ...(raw.skills || {}),
+      ...(rawSkills as unknown as typeof fallback.skills),
     },
-    projects: Array.isArray(raw.projects) ? raw.projects : fallback.projects,
-    certifications: Array.isArray(raw.certifications) ? raw.certifications : fallback.certifications,
-    languages: Array.isArray(raw.languages) ? raw.languages : fallback.languages,
-    awards: Array.isArray(raw.awards) ? raw.awards : fallback.awards,
-    publications: Array.isArray(raw.publications) ? raw.publications : fallback.publications,
-    volunteer: Array.isArray(raw.volunteer) ? raw.volunteer : fallback.volunteer,
-    interests: Array.isArray(raw.interests) ? raw.interests : fallback.interests,
-    referencesText: typeof raw.referencesText === "string" ? raw.referencesText : fallback.referencesText,
-    customSections: Array.isArray(raw.customSections) ? raw.customSections : fallback.customSections,
+    projects: Array.isArray(obj.projects) ? (obj.projects as ResumeData["projects"]) : fallback.projects,
+    certifications: Array.isArray(obj.certifications) ? (obj.certifications as ResumeData["certifications"]) : fallback.certifications,
+    languages: Array.isArray(obj.languages) ? (obj.languages as ResumeData["languages"]) : fallback.languages,
+    awards: Array.isArray(obj.awards) ? (obj.awards as ResumeData["awards"]) : fallback.awards,
+    publications: Array.isArray(obj.publications) ? (obj.publications as ResumeData["publications"]) : fallback.publications,
+    volunteer: Array.isArray(obj.volunteer) ? (obj.volunteer as ResumeData["volunteer"]) : fallback.volunteer,
+    interests: Array.isArray(obj.interests) ? (obj.interests as ResumeData["interests"]) : fallback.interests,
+    referencesText: typeof obj.referencesText === "string" ? obj.referencesText : fallback.referencesText,
+    customSections: Array.isArray(obj.customSections) ? (obj.customSections as ResumeData["customSections"]) : fallback.customSections,
   };
 }
